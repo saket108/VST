@@ -68,7 +68,7 @@ class DetectionLoss(nn.Module):
 
         batch_size = cls_levels[0].shape[0]
         device = cls_levels[0].device
-        dtype = cls_levels[0].dtype
+        loss_dtype = torch.float32
 
         flat_cls: list[torch.Tensor] = []
         flat_box: list[torch.Tensor] = []
@@ -80,18 +80,21 @@ class DetectionLoss(nn.Module):
         for cls_map, box_map, center_map, stride, size_range in zip(
             cls_levels, box_levels, center_levels, self.strides, self.size_ranges
         ):
+            cls_map = cls_map.float()
+            box_map = box_map.float()
+            center_map = center_map.float()
             _, _, feat_h, feat_w = cls_map.shape
-            points = build_points(feat_h, feat_w, stride, device, dtype)
+            points = build_points(feat_h, feat_w, stride, device, loss_dtype)
 
             flat_cls.append(cls_map.permute(0, 2, 3, 1).reshape(batch_size, -1, self.num_classes))
             flat_box.append(box_map.permute(0, 2, 3, 1).reshape(batch_size, -1, 4) * stride)
             flat_center.append(center_map.permute(0, 2, 3, 1).reshape(batch_size, -1))
             flat_points.append(points)
             flat_ranges.append(
-                torch.tensor(size_range, device=device, dtype=dtype).expand(points.shape[0], 2)
+                torch.tensor(size_range, device=device, dtype=loss_dtype).expand(points.shape[0], 2)
             )
             flat_strides.append(
-                torch.full((points.shape[0],), stride, device=device, dtype=dtype)
+                torch.full((points.shape[0],), stride, device=device, dtype=loss_dtype)
             )
 
         pred_cls = torch.cat(flat_cls, dim=1)
@@ -107,7 +110,7 @@ class DetectionLoss(nn.Module):
         total_pos = 0
 
         for batch_index, target in enumerate(targets):
-            gt_boxes = target["boxes"]
+            gt_boxes = target["boxes"].to(dtype=loss_dtype)
             gt_labels = target["labels"]
             assigned = self._assign_targets(points, size_ranges, strides, gt_boxes, gt_labels)
 
@@ -193,11 +196,13 @@ class DetectionLoss(nn.Module):
         matched_boxes = gt_boxes[matched_gt[pos_mask]]
         matched_regs = reg_targets[pos_mask, matched_gt[pos_mask]]
         labels[pos_mask] = gt_labels[matched_gt[pos_mask]]
-        assigned_boxes[pos_mask] = matched_boxes
+        assigned_boxes[pos_mask] = matched_boxes.to(dtype=assigned_boxes.dtype)
 
         lr_min = torch.minimum(matched_regs[:, 0], matched_regs[:, 2])
         lr_max = torch.maximum(matched_regs[:, 0], matched_regs[:, 2]).clamp(min=1e-6)
         tb_min = torch.minimum(matched_regs[:, 1], matched_regs[:, 3])
         tb_max = torch.maximum(matched_regs[:, 1], matched_regs[:, 3]).clamp(min=1e-6)
-        centerness[pos_mask] = torch.sqrt((lr_min / lr_max) * (tb_min / tb_max))
+        centerness[pos_mask] = torch.sqrt((lr_min / lr_max) * (tb_min / tb_max)).to(
+            dtype=centerness.dtype
+        )
         return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
