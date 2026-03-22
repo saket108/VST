@@ -213,8 +213,13 @@ class DetectionHead(nn.Module):
             cls_feat = self.cls_tower(feature)
             reg_feat = self.reg_tower(feature)
             outputs["cls"].append(self.cls_pred(cls_feat))
-            outputs["box"].append(F.softplus(scale(self.box_pred(reg_feat))))
             outputs["center"].append(self.center_pred(reg_feat))
+            # Keep regression in float32 even under AMP. Large positive logits can overflow
+            # in float16 before softplus, which then corrupts GIoU with non-finite boxes.
+            with torch.autocast(device_type=feature.device.type, enabled=False):
+                reg_logits = self.box_pred(reg_feat.float())
+                reg_distances = F.softplus(scale(reg_logits)).clamp(max=1e4)
+            outputs["box"].append(reg_distances)
         return outputs
 
 

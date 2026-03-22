@@ -76,6 +76,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--clip-grad", type=float, default=5.0)
+    parser.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=torch.cuda.is_available(),
+        help="Enable automatic mixed precision on CUDA for faster training.",
+    )
     parser.add_argument("--conf-threshold", type=float, default=0.05)
     parser.add_argument("--nms-iou", type=float, default=0.6)
     parser.add_argument("--max-det", type=int, default=300)
@@ -134,7 +140,8 @@ def main() -> None:
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
+    amp_enabled = args.amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
 
     best_map = 0.0
     history_path = output_dir / "history.csv"
@@ -164,6 +171,7 @@ def main() -> None:
             clip_grad=args.clip_grad,
             epoch=epoch,
             epochs=args.epochs,
+            amp_enabled=amp_enabled,
         )
         scheduler.step()
 

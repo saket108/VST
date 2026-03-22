@@ -36,6 +36,7 @@ def train_one_epoch(
     clip_grad: float,
     epoch: int,
     epochs: int,
+    amp_enabled: bool,
 ) -> dict[str, float]:
     model.train()
     loss_sums = {"total": 0.0, "cls": 0.0, "box": 0.0, "center": 0.0}
@@ -54,9 +55,20 @@ def train_one_epoch(
         targets = move_targets_to_device(targets, device)
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
+        with torch.autocast(device_type=device.type, enabled=amp_enabled):
             outputs = model(images)
             losses = criterion(outputs, targets)
+
+        if not all(
+            torch.isfinite(metric).all()
+            for metric in (losses.total, losses.cls, losses.box, losses.center)
+        ):
+            progress.write(
+                "warning: skipped batch with non-finite loss "
+                f"(total={losses.total.item()}, cls={losses.cls.item()}, "
+                f"box={losses.box.item()}, center={losses.center.item()})"
+            )
+            continue
 
         scaler.scale(losses.total).backward()
         scaler.unscale_(optimizer)
