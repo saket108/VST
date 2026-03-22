@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output", default="runs/research_vstdet")
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="Resume training from a checkpoint path saved by this project.",
+    )
     parser.add_argument("--eval-every", type=int, default=5)
     parser.add_argument("--save-every", type=int, default=25)
     parser.add_argument("--seed", type=int, default=42)
@@ -149,6 +154,25 @@ def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, lis
     return train_loader, val_loader, train_set.config.names
 
 
+def load_checkpoint(
+    path: str | Path,
+    model: VSTDet,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    device: torch.device,
+) -> tuple[int, float]:
+    checkpoint_path = Path(path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state"])
+    optimizer.load_state_dict(checkpoint["optimizer_state"])
+    scheduler.load_state_dict(checkpoint["scheduler_state"])
+    start_epoch = int(checkpoint["epoch"]) + 1
+    best_metric = float(checkpoint.get("best_metric", 0.0))
+    return start_epoch, best_metric
+
+
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
@@ -176,10 +200,20 @@ def main() -> None:
     amp_enabled = args.amp and device.type == "cuda"
     scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
 
+    start_epoch = 1
     best_map = 0.0
     history_path = output_dir / "history.csv"
     train_start = time.time()
     last_val_report: dict[str, object] | None = None
+
+    if args.resume:
+        start_epoch, best_map = load_checkpoint(
+            path=args.resume,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+        )
 
     print(
         "training",
@@ -190,9 +224,11 @@ def main() -> None:
         f"backbone_lr_scale={args.backbone_lr_scale}",
         f"amp={amp_enabled}",
     )
+    if args.resume:
+        print(f"resuming from {args.resume} at epoch {start_epoch}")
     print(f"\nStarting training for {args.epochs} epochs...")
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         start = time.time()
         model.set_backbone_trainable(epoch > args.freeze_backbone_epochs)
         print("\n      Epoch    GPU_mem   box_loss   cls_loss   ctr_loss  Instances       Size")
@@ -253,6 +289,15 @@ def main() -> None:
                 best_map,
                 names,
             )
+        save_checkpoint(
+            output_dir / "last.pt",
+            model,
+            optimizer,
+            scheduler,
+            epoch,
+            best_map,
+            names,
+        )
 
         append_history(history_path, row)
         _ = time.time() - start
