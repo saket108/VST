@@ -93,7 +93,12 @@ def parse_args() -> argparse.Namespace:
         default=torch.cuda.is_available(),
         help="Enable automatic mixed precision on CUDA for faster training.",
     )
-    parser.add_argument("--conf-threshold", type=float, default=0.05)
+    parser.add_argument(
+        "--conf-threshold",
+        type=float,
+        default=0.001,
+        help="Confidence threshold used during validation decoding and metric computation.",
+    )
     parser.add_argument("--nms-iou", type=float, default=0.6)
     parser.add_argument("--max-det", type=int, default=300)
     parser.set_defaults(**config_defaults)

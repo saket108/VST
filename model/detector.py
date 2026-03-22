@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Callable
 
 import torch
@@ -206,6 +207,13 @@ class DetectionHead(nn.Module):
         self.box_pred = nn.Conv2d(channels, 4, 3, padding=1)
         self.center_pred = nn.Conv2d(channels, 1, 3, padding=1)
         self.scales = nn.ModuleList([Scale() for _ in range(levels)])
+        self._init_biases()
+
+    def _init_biases(self, prior_prob: float = 0.01) -> None:
+        cls_bias = math.log(prior_prob / (1.0 - prior_prob))
+        nn.init.constant_(self.cls_pred.bias, cls_bias)
+        nn.init.constant_(self.center_pred.bias, 0.0)
+        nn.init.constant_(self.box_pred.bias, 1.0)
 
     def forward(self, features: tuple[torch.Tensor, ...]) -> dict[str, list[torch.Tensor]]:
         outputs = {"cls": [], "box": [], "center": []}

@@ -147,6 +147,62 @@ def letterbox(
     return image_tensor, boxes
 
 
+def clip_and_filter_boxes(
+    boxes: torch.Tensor,
+    labels: torch.Tensor,
+    size: int,
+    min_size: float = 2.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if boxes.numel() == 0:
+        return boxes, labels
+
+    boxes = boxes.clone()
+    boxes[:, 0::2] = boxes[:, 0::2].clamp_(0, size)
+    boxes[:, 1::2] = boxes[:, 1::2].clamp_(0, size)
+    wh = boxes[:, 2:] - boxes[:, :2]
+    keep = (wh[:, 0] >= min_size) & (wh[:, 1] >= min_size)
+    return boxes[keep], labels[keep]
+
+
+def random_affine_letterbox(
+    image: Image.Image,
+    boxes: torch.Tensor,
+    labels: torch.Tensor,
+    size: int,
+    fill: tuple[int, int, int] = (114, 114, 114),
+    scale_range: tuple[float, float] = (0.75, 1.35),
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    width, height = image.size
+    base_scale = min(size / width, size / height)
+    scale = base_scale * random.uniform(*scale_range)
+    new_width = max(int(round(width * scale)), 1)
+    new_height = max(int(round(height * scale)), 1)
+
+    resized = image.resize((new_width, new_height), Image.BILINEAR)
+    canvas = Image.new("RGB", (size, size), fill)
+
+    if new_width <= size:
+        pad_left = random.randint(0, size - new_width)
+    else:
+        pad_left = -random.randint(0, new_width - size)
+
+    if new_height <= size:
+        pad_top = random.randint(0, size - new_height)
+    else:
+        pad_top = -random.randint(0, new_height - size)
+
+    canvas.paste(resized, (pad_left, pad_top))
+
+    boxes = boxes.clone()
+    if boxes.numel() > 0:
+        boxes[:, [0, 2]] = boxes[:, [0, 2]] * scale + pad_left
+        boxes[:, [1, 3]] = boxes[:, [1, 3]] * scale + pad_top
+        boxes, labels = clip_and_filter_boxes(boxes, labels, size)
+
+    image_tensor = TF.pil_to_tensor(canvas).float() / 255.0
+    return image_tensor, boxes, labels
+
+
 class YoloDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]):
     def __init__(
         self,
@@ -186,7 +242,16 @@ class YoloDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]
             image = TF.adjust_contrast(image, 0.8 + random.random() * 0.4)
             image = TF.adjust_saturation(image, 0.8 + random.random() * 0.4)
 
-        image_tensor, boxes = letterbox(image, boxes, self.image_size)
+        if self.augment:
+            image_tensor, boxes, labels = random_affine_letterbox(
+                image,
+                boxes,
+                labels,
+                self.image_size,
+            )
+        else:
+            image_tensor, boxes = letterbox(image, boxes, self.image_size)
+
         target = {
             "boxes": boxes,
             "labels": labels,
