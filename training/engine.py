@@ -113,6 +113,7 @@ def validate(
     conf_threshold: float,
     nms_iou: float,
     max_det: int,
+    stage_label: str = "Epoch val",
 ) -> tuple[dict[str, float], dict[str, object]]:
     model.eval()
     loss_sums = {"val_total": 0.0, "val_cls": 0.0, "val_box": 0.0, "val_center": 0.0}
@@ -126,7 +127,7 @@ def validate(
         total=len(loader),
         leave=True,
         dynamic_ncols=True,
-        desc="                 Class     Images  Instances  Precision     Recall      mAP50  mAP50-95",
+        desc=f"{stage_label:>24}  Images  Instances  Precision     Recall      mAP50  mAP50-95",
         bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
     )
 

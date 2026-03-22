@@ -268,6 +268,7 @@ def main() -> None:
                 conf_threshold=args.conf_threshold,
                 nms_iou=args.nms_iou,
                 max_det=args.max_det,
+                stage_label="Epoch val",
             )
             row.update(val_metrics)
             last_val_report = val_report
@@ -311,7 +312,7 @@ def main() -> None:
     print(f"\n{args.epochs} epochs completed in {total_hours:.3f} hours.")
     print(f"Results saved to {output_dir}")
     if last_val_report is not None:
-        print("\nFinal validation report:")
+        print("\nFinal checkpoint val:")
         print(format_metrics_table(last_val_report))
 
 
