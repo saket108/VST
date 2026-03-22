@@ -1,0 +1,12 @@
+path: C:/Users/tsake/OneDrive/Desktop/Aircraft_dataset
+train: images/train
+val: images/val
+test: images/test
+nc: 6
+names:
+  - crack
+  - dent
+  - corrosion
+  - scratch
+  - missing-head
+  - paint-peel-off

@@ -1,0 +1,4 @@
+images/val/aircraft_000005.jpg
+images/val/aircraft_000007.jpg
+images/val/aircraft_000021.jpg
+images/val/aircraft_000037.jpg

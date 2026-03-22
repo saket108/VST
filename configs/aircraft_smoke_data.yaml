@@ -1,0 +1,12 @@
+path: C:/Users/tsake/OneDrive/Desktop/Aircraft_dataset
+train: C:/Users/tsake/OneDrive/Desktop/VST/configs/aircraft_smoke_train.txt
+val: C:/Users/tsake/OneDrive/Desktop/VST/configs/aircraft_smoke_val.txt
+test: images/test
+nc: 6
+names:
+  - crack
+  - dent
+  - corrosion
+  - scratch
+  - missing-head
+  - paint-peel-off

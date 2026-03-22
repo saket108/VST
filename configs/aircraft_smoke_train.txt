@@ -1,0 +1,8 @@
+images/train/aircraft_000000.jpg
+images/train/aircraft_000001.jpg
+images/train/aircraft_000002.jpg
+images/train/aircraft_000003.jpg
+images/train/aircraft_000004.jpg
+images/train/aircraft_000006.jpg
+images/train/aircraft_000010.jpg
+images/train/aircraft_000012.jpg
