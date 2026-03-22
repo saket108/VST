@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Freeze backbone parameters for the first N epochs.",
     )
+    parser.add_argument(
+        "--detail-branch",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the high-resolution detail branch experimental model variant.",
+    )
     parser.add_argument("--imgsz", type=int, default=896, help="Square training size.")
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -87,6 +93,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--clip-grad", type=float, default=5.0)
+    parser.add_argument(
+        "--center-radius",
+        type=float,
+        default=1.5,
+        help="Center-sampling radius used by the detector target assignment.",
+    )
+    parser.add_argument(
+        "--topk-candidates",
+        type=int,
+        default=0,
+        help="Add top-k center-prior positives per ground truth during target assignment.",
+    )
     parser.add_argument(
         "--amp",
         action=argparse.BooleanOptionalAction,
@@ -192,8 +210,14 @@ def main() -> None:
         variant=args.variant,
         backbone_name=args.backbone,
         pretrained_backbone=args.pretrained_backbone,
+        use_detail_branch=args.detail_branch,
     ).to(device)
-    criterion = DetectionLoss(num_classes=len(names), strides=model.strides)
+    criterion = DetectionLoss(
+        num_classes=len(names),
+        strides=model.strides,
+        center_radius=args.center_radius,
+        topk_candidates=args.topk_candidates,
+    )
 
     optimizer = build_optimizer(
         model=model,
@@ -226,7 +250,10 @@ def main() -> None:
         f"backbone={args.backbone}",
         f"pretrained_backbone={args.pretrained_backbone}",
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
+        f"detail_branch={args.detail_branch}",
         f"backbone_lr_scale={args.backbone_lr_scale}",
+        f"center_radius={args.center_radius}",
+        f"topk_candidates={args.topk_candidates}",
         f"amp={amp_enabled}",
     )
     if args.resume:

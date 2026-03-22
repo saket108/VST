@@ -43,11 +43,13 @@ class DetectionLoss(nn.Module):
         strides: tuple[int, ...] = (4, 8, 16, 32),
         size_ranges: tuple[tuple[float, float], ...] | None = None,
         center_radius: float = 1.5,
+        topk_candidates: int = 0,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
         self.strides = strides
         self.center_radius = center_radius
+        self.topk_candidates = topk_candidates
         if size_ranges is None:
             if len(strides) == 5:
                 size_ranges = (
@@ -195,6 +197,25 @@ class DetectionLoss(nn.Module):
         )
 
         matches = inside_box & inside_range & inside_center
+        if self.topk_candidates > 0:
+            candidate_mask = inside_box & inside_range
+            gt_widths = (gt_boxes[:, 2] - gt_boxes[:, 0]).clamp(min=1e-6)
+            gt_heights = (gt_boxes[:, 3] - gt_boxes[:, 1]).clamp(min=1e-6)
+            center_distance = (
+                ((x - gt_centers[:, 0]) / gt_widths) ** 2
+                + ((y - gt_centers[:, 1]) / gt_heights) ** 2
+            )
+            center_distance[~candidate_mask] = float("inf")
+
+            topk_matches = torch.zeros_like(candidate_mask)
+            topk = min(self.topk_candidates, num_points)
+            topk_distance, topk_indices = center_distance.topk(topk, dim=0, largest=False)
+            for gt_index in range(gt_boxes.shape[0]):
+                valid = torch.isfinite(topk_distance[:, gt_index])
+                if valid.any():
+                    topk_matches[topk_indices[valid, gt_index], gt_index] = True
+            matches = matches | topk_matches
+
         areas = ((gt_boxes[:, 2] - gt_boxes[:, 0]) * (gt_boxes[:, 3] - gt_boxes[:, 1]))[None, :]
         areas = areas.repeat(num_points, 1)
         areas[~matches] = float("inf")
