@@ -6,7 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from utils.box_ops import distance_to_boxes, generalized_box_iou
+from utils.box_ops import box_iou, distance_to_boxes, generalized_box_iou
 from utils.points import build_points
 
 
@@ -42,14 +42,22 @@ class DetectionLoss(nn.Module):
         num_classes: int,
         strides: tuple[int, ...] = (4, 8, 16, 32),
         size_ranges: tuple[tuple[float, float], ...] | None = None,
+        assigner: str = "fcos",
         center_radius: float = 1.5,
         topk_candidates: int = 0,
+        atss_topk: int = 9,
+        atss_anchor_scale: float = 4.0,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
         self.strides = strides
+        self.assigner = assigner
         self.center_radius = center_radius
         self.topk_candidates = topk_candidates
+        self.atss_topk = atss_topk
+        self.atss_anchor_scale = atss_anchor_scale
+        if self.assigner not in {"fcos", "atss"}:
+            raise ValueError("assigner must be either 'fcos' or 'atss'.")
         if size_ranges is None:
             if len(strides) == 5:
                 size_ranges = (
@@ -161,6 +169,18 @@ class DetectionLoss(nn.Module):
         gt_boxes: torch.Tensor,
         gt_labels: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
+        if self.assigner == "atss":
+            return self._assign_targets_atss(points, strides, gt_boxes, gt_labels)
+        return self._assign_targets_fcos(points, size_ranges, strides, gt_boxes, gt_labels)
+
+    def _assign_targets_fcos(
+        self,
+        points: torch.Tensor,
+        size_ranges: torch.Tensor,
+        strides: torch.Tensor,
+        gt_boxes: torch.Tensor,
+        gt_labels: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
         device = points.device
         num_points = points.shape[0]
         labels = torch.full((num_points,), -1, dtype=torch.long, device=device)
@@ -222,6 +242,102 @@ class DetectionLoss(nn.Module):
 
         min_areas, matched_gt = areas.min(dim=1)
         pos_mask = torch.isfinite(min_areas)
+        if not pos_mask.any():
+            return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
+
+        matched_boxes = gt_boxes[matched_gt[pos_mask]]
+        matched_regs = reg_targets[pos_mask, matched_gt[pos_mask]]
+        labels[pos_mask] = gt_labels[matched_gt[pos_mask]]
+        assigned_boxes[pos_mask] = matched_boxes.to(dtype=assigned_boxes.dtype)
+
+        lr_min = torch.minimum(matched_regs[:, 0], matched_regs[:, 2])
+        lr_max = torch.maximum(matched_regs[:, 0], matched_regs[:, 2]).clamp(min=1e-6)
+        tb_min = torch.minimum(matched_regs[:, 1], matched_regs[:, 3])
+        tb_max = torch.maximum(matched_regs[:, 1], matched_regs[:, 3]).clamp(min=1e-6)
+        centerness[pos_mask] = torch.sqrt((lr_min / lr_max) * (tb_min / tb_max)).to(
+            dtype=centerness.dtype
+        )
+        return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
+
+    def _assign_targets_atss(
+        self,
+        points: torch.Tensor,
+        strides: torch.Tensor,
+        gt_boxes: torch.Tensor,
+        gt_labels: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        device = points.device
+        num_points = points.shape[0]
+        labels = torch.full((num_points,), -1, dtype=torch.long, device=device)
+        assigned_boxes = torch.zeros((num_points, 4), device=device, dtype=points.dtype)
+        centerness = torch.zeros((num_points,), device=device, dtype=points.dtype)
+
+        if gt_boxes.numel() == 0:
+            return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
+
+        x = points[:, 0][:, None]
+        y = points[:, 1][:, None]
+        left = x - gt_boxes[:, 0]
+        top = y - gt_boxes[:, 1]
+        right = gt_boxes[:, 2] - x
+        bottom = gt_boxes[:, 3] - y
+        reg_targets = torch.stack([left, top, right, bottom], dim=-1)
+        inside_box = reg_targets.min(dim=-1).values > 0
+
+        gt_centers = (gt_boxes[:, :2] + gt_boxes[:, 2:]) * 0.5
+        center_dist = (points[:, None, 0] - gt_centers[:, 0]) ** 2 + (
+            points[:, None, 1] - gt_centers[:, 1]
+        ) ** 2
+
+        half_size = strides * (self.atss_anchor_scale * 0.5)
+        anchors = torch.stack(
+            [
+                points[:, 0] - half_size,
+                points[:, 1] - half_size,
+                points[:, 0] + half_size,
+                points[:, 1] + half_size,
+            ],
+            dim=-1,
+        )
+        anchor_ious = box_iou(anchors, gt_boxes)
+
+        matched_gt = torch.full((num_points,), -1, dtype=torch.long, device=device)
+        matched_iou = torch.zeros((num_points,), dtype=points.dtype, device=device)
+
+        for gt_index in range(gt_boxes.shape[0]):
+            candidate_indices: list[torch.Tensor] = []
+            for stride_value in self.strides:
+                level_indices = torch.nonzero(strides == float(stride_value), as_tuple=False).squeeze(1)
+                if level_indices.numel() == 0:
+                    continue
+                k = min(self.atss_topk, level_indices.numel())
+                level_dist = center_dist[level_indices, gt_index]
+                topk_idx = level_dist.topk(k, largest=False).indices
+                candidate_indices.append(level_indices[topk_idx])
+
+            if not candidate_indices:
+                continue
+
+            candidate_indices = torch.cat(candidate_indices, dim=0)
+            candidate_ious = anchor_ious[candidate_indices, gt_index]
+            iou_threshold = candidate_ious.mean() + candidate_ious.std(unbiased=False)
+            positive_indices = candidate_indices[candidate_ious >= iou_threshold]
+            positive_indices = positive_indices[inside_box[positive_indices, gt_index]]
+
+            if positive_indices.numel() == 0:
+                inside_indices = torch.nonzero(inside_box[:, gt_index], as_tuple=False).squeeze(1)
+                if inside_indices.numel() == 0:
+                    continue
+                best_inside = inside_indices[anchor_ious[inside_indices, gt_index].argmax()]
+                positive_indices = best_inside.unsqueeze(0)
+
+            positive_ious = anchor_ious[positive_indices, gt_index]
+            better = positive_ious > matched_iou[positive_indices]
+            chosen = positive_indices[better]
+            matched_gt[chosen] = gt_index
+            matched_iou[chosen] = positive_ious[better]
+
+        pos_mask = matched_gt >= 0
         if not pos_mask.any():
             return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
 

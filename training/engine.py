@@ -184,6 +184,8 @@ def save_checkpoint(
             "scheduler_state": scheduler.state_dict(),
             "variant": model.variant,
             "backbone_name": model.backbone_name,
+            "neck_name": model.neck_name,
+            "head_depth": model.head_depth,
             "pretrained_backbone": model.pretrained_backbone,
             "num_classes": model.num_classes,
             "names": names,

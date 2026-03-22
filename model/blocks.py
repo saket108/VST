@@ -126,6 +126,30 @@ class WeightedFeatureFusion(nn.Module):
         return self.project(fused)
 
 
+class ContextAwareFusion(nn.Module):
+    def __init__(self, channels: int, inputs: int) -> None:
+        super().__init__()
+        self.weights = nn.Parameter(torch.ones(inputs))
+        hidden = max(channels // 4, 16)
+        self.context_gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, hidden, 1),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden, channels, 1),
+            nn.Sigmoid(),
+        )
+        self.local = ConvBNAct(channels, channels, groups=channels)
+        self.mix = ConvBNAct(channels, channels, kernel_size=1, act=False)
+
+    def forward(self, features: list[torch.Tensor]) -> torch.Tensor:
+        weights = F.relu(self.weights)
+        weights = weights / (weights.sum() + 1e-4)
+        fused = sum(weight * feature for weight, feature in zip(weights, features))
+        gated = fused * self.context_gate(fused)
+        refined = self.local(gated) + fused
+        return F.silu(self.mix(refined) + fused, inplace=True)
+
+
 class Scale(nn.Module):
     def __init__(self, init_value: float = 1.0) -> None:
         super().__init__()

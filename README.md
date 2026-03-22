@@ -17,8 +17,9 @@ This project uses a cleaner research-style layout instead of a flat script packa
 
 - pretrained `torchvision` backbones or the custom `ContextBridge` backbone
 - bidirectional weighted feature fusion neck
+- optional `CAFPN` neck for a stronger context-aware pyramid
 - decoupled classification, box, and centerness head
-- FCOS-style point assignment and GIoU-based regression loss
+- FCOS-style or ATSS-style point assignment and GIoU-based regression loss
 - direct support for datasets in YOLO annotation format
 
 This is a research baseline. The code is custom, but a paper contribution still comes from experiments, ablations, and evidence.
@@ -50,6 +51,12 @@ Stronger pretrained backbone:
 
 ```powershell
 python tools/train.py --data path\to\data.yaml --variant small --backbone convnext_tiny --imgsz 896 --epochs 300 --batch-size 6
+```
+
+Stronger detector variant:
+
+```powershell
+python tools/train.py --data path\to\data.yaml --variant small --backbone convnext_tiny --neck cafpn --head-depth 3 --assigner atss --imgsz 640 --epochs 300 --batch-size 4
 ```
 
 Lighter pretrained backbone:

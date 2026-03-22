@@ -53,6 +53,12 @@ def parse_args() -> argparse.Namespace:
         help="Feature extractor used before the custom neck and head.",
     )
     parser.add_argument(
+        "--neck",
+        choices=["bifusion", "cafpn"],
+        default="bifusion",
+        help="Feature pyramid fusion module.",
+    )
+    parser.add_argument(
         "--pretrained-backbone",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -73,6 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=896, help="Square training size.")
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--head-depth", type=int, default=2)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument(
@@ -107,6 +114,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--translate", type=float, default=0.1)
     parser.add_argument("--erasing", type=float, default=0.0)
     parser.add_argument(
+        "--assigner",
+        choices=["fcos", "atss"],
+        default="fcos",
+        help="Target assignment strategy used during training.",
+    )
+    parser.add_argument(
         "--center-radius",
         type=float,
         default=1.5,
@@ -117,6 +130,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Add top-k center-prior positives per ground truth during target assignment.",
+    )
+    parser.add_argument(
+        "--atss-topk",
+        type=int,
+        default=9,
+        help="Top-k candidates per level used by the ATSS assigner.",
     )
     parser.add_argument(
         "--amp",
@@ -247,13 +266,17 @@ def main() -> None:
         variant=args.variant,
         backbone_name=args.backbone,
         pretrained_backbone=args.pretrained_backbone,
+        neck_name=args.neck,
+        head_depth=args.head_depth,
         use_detail_branch=args.detail_branch,
     ).to(device)
     criterion = DetectionLoss(
         num_classes=len(names),
         strides=model.strides,
+        assigner=args.assigner,
         center_radius=args.center_radius,
         topk_candidates=args.topk_candidates,
+        atss_topk=args.atss_topk,
     )
 
     optimizer = build_optimizer(
@@ -285,12 +308,16 @@ def main() -> None:
         "training",
         f"variant={args.variant}",
         f"backbone={args.backbone}",
+        f"neck={args.neck}",
         f"pretrained_backbone={args.pretrained_backbone}",
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
+        f"head_depth={args.head_depth}",
         f"detail_branch={args.detail_branch}",
         f"backbone_lr_scale={args.backbone_lr_scale}",
+        f"assigner={args.assigner}",
         f"center_radius={args.center_radius}",
         f"topk_candidates={args.topk_candidates}",
+        f"atss_topk={args.atss_topk}",
         f"mosaic={args.mosaic}",
         f"mixup={args.mixup}",
         f"copy_paste={args.copy_paste}",

@@ -18,7 +18,15 @@ from torchvision.models import (
 )
 from torchvision.models.feature_extraction import create_feature_extractor
 
-from .blocks import ContextBridge, ConvBNAct, DetailStem, EdgeResidual, Scale, WeightedFeatureFusion
+from .blocks import (
+    ContextAwareFusion,
+    ContextBridge,
+    ConvBNAct,
+    DetailStem,
+    EdgeResidual,
+    Scale,
+    WeightedFeatureFusion,
+)
 from utils.box_ops import distance_to_boxes
 from utils.points import build_points
 
@@ -209,6 +217,63 @@ class BiFusionNeck(nn.Module):
         return tuple(block(feature) for block, feature in zip(self.refine, outputs))
 
 
+class CAFPNNeck(nn.Module):
+    def __init__(self, in_channels: tuple[int, ...], out_channels: int) -> None:
+        super().__init__()
+        if len(in_channels) != 4:
+            raise ValueError("CAFPNNeck expects four backbone feature levels.")
+
+        self.lateral = nn.ModuleList(
+            [ConvBNAct(ch, out_channels, kernel_size=1) for ch in in_channels]
+        )
+        self.downsample = nn.ModuleList(
+            [ConvBNAct(out_channels, out_channels, stride=2) for _ in range(3)]
+        )
+        self.context_inject = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.AdaptiveAvgPool2d(1),
+                    nn.Conv2d(out_channels, out_channels, 1),
+                    nn.Sigmoid(),
+                )
+                for _ in range(4)
+            ]
+        )
+
+        self.topdown_p4 = ContextAwareFusion(out_channels, inputs=2)
+        self.topdown_p3 = ContextAwareFusion(out_channels, inputs=2)
+        self.topdown_p2 = ContextAwareFusion(out_channels, inputs=2)
+        self.bottomup_p3 = ContextAwareFusion(out_channels, inputs=2)
+        self.bottomup_p4 = ContextAwareFusion(out_channels, inputs=2)
+        self.bottomup_p5 = ContextAwareFusion(out_channels, inputs=2)
+        self.refine = nn.ModuleList([ContextBridge(out_channels) for _ in range(4)])
+
+    def _apply_context(self, feature: torch.Tensor, context: torch.Tensor, index: int) -> torch.Tensor:
+        gate = self.context_inject[index](context)
+        return feature * gate + feature
+
+    def forward(self, features: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+        p2, p3, p4, p5 = [layer(x) for layer, x in zip(self.lateral, features)]
+        global_context = p5
+
+        p4_td = self.topdown_p4([p4, F.interpolate(p5, size=p4.shape[-2:], mode="nearest")])
+        p4_td = self._apply_context(p4_td, global_context, 0)
+
+        p3_td = self.topdown_p3([p3, F.interpolate(p4_td, size=p3.shape[-2:], mode="nearest")])
+        p3_td = self._apply_context(p3_td, global_context, 1)
+
+        p2_td = self.topdown_p2([p2, F.interpolate(p3_td, size=p2.shape[-2:], mode="nearest")])
+        p2_td = self._apply_context(p2_td, global_context, 2)
+
+        p3_out = self.bottomup_p3([p3_td, self.downsample[0](p2_td)])
+        p4_out = self.bottomup_p4([p4_td, self.downsample[1](p3_out)])
+        p5_out = self.bottomup_p5([p5, self.downsample[2](p4_out)])
+        p5_out = self._apply_context(p5_out, global_context, 3)
+
+        outputs = [p2_td, p3_out, p4_out, p5_out]
+        return tuple(block(feature) for block, feature in zip(self.refine, outputs))
+
+
 class HeadTower(nn.Sequential):
     def __init__(self, channels: int, depth: int = 2) -> None:
         layers: list[nn.Module] = []
@@ -219,10 +284,10 @@ class HeadTower(nn.Sequential):
 
 
 class DetectionHead(nn.Module):
-    def __init__(self, channels: int, num_classes: int, levels: int) -> None:
+    def __init__(self, channels: int, num_classes: int, levels: int, depth: int = 2) -> None:
         super().__init__()
-        self.cls_tower = HeadTower(channels)
-        self.reg_tower = HeadTower(channels)
+        self.cls_tower = HeadTower(channels, depth=depth)
+        self.reg_tower = HeadTower(channels, depth=depth)
         self.cls_pred = nn.Conv2d(channels, num_classes, 3, padding=1)
         self.box_pred = nn.Conv2d(channels, 4, 3, padding=1)
         self.center_pred = nn.Conv2d(channels, 1, 3, padding=1)
@@ -258,6 +323,8 @@ class VSTDet(nn.Module):
         variant: str = "small",
         backbone_name: str = "efficientnet_v2_s",
         pretrained_backbone: bool = True,
+        neck_name: str = "bifusion",
+        head_depth: int = 2,
         use_detail_branch: bool = False,
     ) -> None:
         super().__init__()
@@ -269,6 +336,8 @@ class VSTDet(nn.Module):
         self.variant = variant
         self.backbone_name = backbone_name
         self.pretrained_backbone = pretrained_backbone
+        self.neck_name = neck_name
+        self.head_depth = head_depth
         self.use_detail_branch = use_detail_branch
         self.strides = (2, 4, 8, 16, 32) if use_detail_branch else (4, 8, 16, 32)
         self.detail_stem = DetailStem(cfg.detail_channels) if use_detail_branch else None
@@ -288,8 +357,20 @@ class VSTDet(nn.Module):
                 else self.backbone.channels
             )
 
-        self.neck = BiFusionNeck(neck_in_channels, cfg.head_channels)
-        self.head = DetectionHead(cfg.head_channels, num_classes, levels=len(self.strides))
+        if neck_name == "bifusion":
+            self.neck = BiFusionNeck(neck_in_channels, cfg.head_channels)
+        elif neck_name == "cafpn":
+            if use_detail_branch:
+                raise ValueError("CAFPN neck does not support detail_branch.")
+            self.neck = CAFPNNeck(neck_in_channels, cfg.head_channels)
+        else:
+            raise ValueError(f"Unknown neck '{neck_name}'. Expected 'bifusion' or 'cafpn'.")
+        self.head = DetectionHead(
+            cfg.head_channels,
+            num_classes,
+            levels=len(self.strides),
+            depth=head_depth,
+        )
 
     def set_backbone_trainable(self, trainable: bool) -> None:
         for parameter in self.backbone.parameters():
