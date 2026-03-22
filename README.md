@@ -63,3 +63,41 @@ Custom backbone ablation:
 ```powershell
 python tools/train.py --data path\to\data.yaml --variant small --backbone custom --no-pretrained-backbone --imgsz 896 --epochs 300 --batch-size 8
 ```
+
+## Colab quickstart
+
+If you want a short Colab verification run, use the Colab config:
+
+```bash
+python tools/train.py --config configs/vstdet_colab_10ep.yaml --data /content/drive/MyDrive/Aircraft_dataset/data.yaml
+```
+
+Recommended Colab setup:
+
+1. Enable GPU in Colab.
+2. Clone the repo and install requirements:
+
+```bash
+git clone https://github.com/saket108/VST.git
+cd VST
+pip install -r requirements.txt
+```
+
+3. Mount Google Drive and point `--data` to a YOLO-style dataset YAML stored there.
+
+If your dataset root lives on Drive at `/content/drive/MyDrive/Aircraft_dataset`, a working YAML is:
+
+```yaml
+path: /content/drive/MyDrive/Aircraft_dataset
+train: images/train
+val: images/val
+test: images/test
+nc: 6
+names:
+  - crack
+  - dent
+  - corrosion
+  - scratch
+  - missing-head
+  - paint-peel-off
+```
