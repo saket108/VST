@@ -10,7 +10,7 @@ from tqdm.auto import tqdm
 
 from model.detector import VSTDet, decode_predictions
 from training.losses import DetectionLoss
-from utils.evaluator import DetectionMetricsAccumulator
+from utils.evaluator import DetectionMetricsAccumulator, format_summary_row
 
 
 def move_targets_to_device(
@@ -151,6 +151,7 @@ def validate(
 
     metrics = {key: value / max(total_batches, 1) for key, value in loss_sums.items()}
     report = accumulator.compute()
+    progress.write(format_summary_row(report))
     summary = report["summary"]
     metrics.update(
         {

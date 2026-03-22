@@ -18,7 +18,7 @@ from data.dataset import YoloDetectionDataset, collate_fn
 from model.detector import VSTDet
 from training.engine import append_history, save_checkpoint, train_one_epoch, validate
 from training.losses import DetectionLoss
-from utils.evaluator import format_metrics_table, format_summary_row
+from utils.evaluator import format_metrics_table
 
 
 def load_config_defaults(config_path: str | None) -> dict:
@@ -149,12 +149,6 @@ def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, lis
     return train_loader, val_loader, train_set.config.names
 
 
-def format_metric_value(value: float) -> str:
-    if abs(value) < 1e-3 and value != 0.0:
-        return f"{value:.2e}"
-    return f"{value:.4f}"
-
-
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
@@ -236,8 +230,6 @@ def main() -> None:
             )
             row.update(val_metrics)
             last_val_report = val_report
-            print("                 Class     Images  Instances  Precision     Recall      mAP50  mAP50-95")
-            print(format_summary_row(val_report))
 
             if val_metrics["map50_95"] >= best_map:
                 best_map = val_metrics["map50_95"]
@@ -263,11 +255,7 @@ def main() -> None:
             )
 
         append_history(history_path, row)
-        epoch_time = time.time() - start
-        summary = " ".join(
-            f"{key}={format_metric_value(value)}" for key, value in row.items() if isinstance(value, float)
-        )
-        print(f"epoch {epoch:03d} {summary} time={epoch_time:.1f}s")
+        _ = time.time() - start
 
     total_hours = (time.time() - train_start) / 3600.0
     print(f"\n{args.epochs} epochs completed in {total_hours:.3f} hours.")
