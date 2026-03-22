@@ -14,7 +14,7 @@ import torch
 from torch.utils.data import DataLoader
 import yaml
 
-from data.dataset import YoloDetectionDataset, collate_fn
+from data.dataset import AugmentConfig, YoloDetectionDataset, collate_fn
 from model.detector import VSTDet
 from training.engine import append_history, save_checkpoint, train_one_epoch, validate
 from training.losses import DetectionLoss
@@ -93,6 +93,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--clip-grad", type=float, default=5.0)
+    parser.add_argument("--copy-paste", type=float, default=0.0)
+    parser.add_argument("--copy-paste-mode", choices=["flip"], default="flip")
+    parser.add_argument("--mosaic", type=float, default=0.0)
+    parser.add_argument("--mixup", type=float, default=0.0)
+    parser.add_argument("--degrees", type=float, default=0.0)
+    parser.add_argument("--flipud", type=float, default=0.0)
+    parser.add_argument("--fliplr", type=float, default=0.5)
+    parser.add_argument("--hsv-h", type=float, default=0.015)
+    parser.add_argument("--hsv-s", type=float, default=0.7)
+    parser.add_argument("--hsv-v", type=float, default=0.4)
+    parser.add_argument("--scale", type=float, default=0.35)
+    parser.add_argument("--translate", type=float, default=0.1)
+    parser.add_argument("--erasing", type=float, default=0.0)
     parser.add_argument(
         "--center-radius",
         type=float,
@@ -129,6 +142,24 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def build_augment_config(args: argparse.Namespace) -> AugmentConfig:
+    return AugmentConfig(
+        copy_paste=args.copy_paste,
+        copy_paste_mode=args.copy_paste_mode,
+        mosaic=args.mosaic,
+        mixup=args.mixup,
+        degrees=args.degrees,
+        flipud=args.flipud,
+        fliplr=args.fliplr,
+        hsv_h=args.hsv_h,
+        hsv_s=args.hsv_s,
+        hsv_v=args.hsv_v,
+        scale=args.scale,
+        translate=args.translate,
+        erasing=args.erasing,
+    )
+
+
 def build_optimizer(
     model: VSTDet,
     lr: float,
@@ -152,7 +183,13 @@ def build_optimizer(
 
 
 def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, list[str]]:
-    train_set = YoloDetectionDataset(args.data, split="train", image_size=args.imgsz, augment=True)
+    train_set = YoloDetectionDataset(
+        args.data,
+        split="train",
+        image_size=args.imgsz,
+        augment=True,
+        augment_config=build_augment_config(args),
+    )
     val_set = YoloDetectionDataset(args.data, split="val", image_size=args.imgsz, augment=False)
     pin_memory = torch.device(args.device).type == "cuda"
 
@@ -254,6 +291,9 @@ def main() -> None:
         f"backbone_lr_scale={args.backbone_lr_scale}",
         f"center_radius={args.center_radius}",
         f"topk_candidates={args.topk_candidates}",
+        f"mosaic={args.mosaic}",
+        f"mixup={args.mixup}",
+        f"copy_paste={args.copy_paste}",
         f"amp={amp_enabled}",
     )
     if args.resume:
