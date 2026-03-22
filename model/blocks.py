@@ -103,6 +103,16 @@ class ContextBridge(nn.Module):
         return F.silu(x + self.mix(gated), inplace=True)
 
 
+class DetailStem(nn.Sequential):
+    def __init__(self, out_channels: int) -> None:
+        hidden = max(out_channels // 2, 16)
+        super().__init__(
+            ConvBNAct(3, hidden, stride=2),
+            ConvBNAct(hidden, out_channels),
+            ContextBridge(out_channels),
+        )
+
+
 class WeightedFeatureFusion(nn.Module):
     def __init__(self, channels: int, inputs: int) -> None:
         super().__init__()

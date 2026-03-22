@@ -48,12 +48,23 @@ class DetectionLoss(nn.Module):
         self.num_classes = num_classes
         self.strides = strides
         self.center_radius = center_radius
-        self.size_ranges = size_ranges or (
-            (0.0, 64.0),
-            (64.0, 128.0),
-            (128.0, 256.0),
-            (256.0, 1e8),
-        )
+        if size_ranges is None:
+            if len(strides) == 5:
+                size_ranges = (
+                    (0.0, 32.0),
+                    (32.0, 64.0),
+                    (64.0, 128.0),
+                    (128.0, 256.0),
+                    (256.0, 1e8),
+                )
+            else:
+                size_ranges = (
+                    (0.0, 64.0),
+                    (64.0, 128.0),
+                    (128.0, 256.0),
+                    (256.0, 1e8),
+                )
+        self.size_ranges = size_ranges
         if len(self.size_ranges) != len(self.strides):
             raise ValueError("size_ranges must match the number of strides.")
 

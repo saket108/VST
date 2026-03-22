@@ -18,7 +18,7 @@ from torchvision.models import (
 )
 from torchvision.models.feature_extraction import create_feature_extractor
 
-from .blocks import ContextBridge, ConvBNAct, EdgeResidual, Scale, WeightedFeatureFusion
+from .blocks import ContextBridge, ConvBNAct, DetailStem, EdgeResidual, Scale, WeightedFeatureFusion
 from utils.box_ops import distance_to_boxes
 from utils.points import build_points
 
@@ -27,6 +27,7 @@ from utils.points import build_points
 class VariantConfig:
     channels: tuple[int, int, int, int]
     depths: tuple[int, int, int, int]
+    detail_channels: int
     head_channels: int
 
 
@@ -39,9 +40,9 @@ class BackboneSpec:
 
 
 VARIANTS: dict[str, VariantConfig] = {
-    "tiny": VariantConfig((64, 96, 160, 224), (2, 2, 4, 2), 96),
-    "small": VariantConfig((64, 128, 192, 256), (2, 3, 5, 2), 128),
-    "base": VariantConfig((96, 160, 256, 320), (3, 4, 6, 3), 160),
+    "tiny": VariantConfig((64, 96, 160, 224), (2, 2, 4, 2), 48, 96),
+    "small": VariantConfig((64, 128, 192, 256), (2, 3, 5, 2), 64, 128),
+    "base": VariantConfig((96, 160, 256, 320), (3, 4, 6, 3), 80, 160),
 }
 
 TORCHVISION_BACKBONES: dict[str, BackboneSpec] = {
@@ -155,37 +156,42 @@ class TorchvisionBackbone(nn.Module):
 
 
 class BiFusionNeck(nn.Module):
-    def __init__(self, in_channels: tuple[int, int, int, int], out_channels: int) -> None:
+    def __init__(self, in_channels: tuple[int, int, int, int, int], out_channels: int) -> None:
         super().__init__()
         self.lateral = nn.ModuleList(
             [ConvBNAct(ch, out_channels, kernel_size=1) for ch in in_channels]
         )
         self.downsample = nn.ModuleList(
-            [ConvBNAct(out_channels, out_channels, stride=2) for _ in range(3)]
+            [ConvBNAct(out_channels, out_channels, stride=2) for _ in range(4)]
         )
 
+        self.topdown_p5 = WeightedFeatureFusion(out_channels, inputs=2)
         self.topdown_p4 = WeightedFeatureFusion(out_channels, inputs=2)
         self.topdown_p3 = WeightedFeatureFusion(out_channels, inputs=2)
         self.topdown_p2 = WeightedFeatureFusion(out_channels, inputs=2)
+        self.topdown_p1 = WeightedFeatureFusion(out_channels, inputs=2)
 
+        self.bottomup_p2 = WeightedFeatureFusion(out_channels, inputs=2)
         self.bottomup_p3 = WeightedFeatureFusion(out_channels, inputs=2)
         self.bottomup_p4 = WeightedFeatureFusion(out_channels, inputs=2)
         self.bottomup_p5 = WeightedFeatureFusion(out_channels, inputs=2)
 
-        self.refine = nn.ModuleList([ContextBridge(out_channels) for _ in range(4)])
+        self.refine = nn.ModuleList([ContextBridge(out_channels) for _ in range(5)])
 
     def forward(self, features: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
-        p2, p3, p4, p5 = [layer(x) for layer, x in zip(self.lateral, features)]
+        p1, p2, p3, p4, p5 = [layer(x) for layer, x in zip(self.lateral, features)]
 
-        p4_td = self.topdown_p4([p4, F.interpolate(p5, size=p4.shape[-2:], mode="nearest")])
-        p3_td = self.topdown_p3([p3, F.interpolate(p4_td, size=p3.shape[-2:], mode="nearest")])
-        p2_td = self.topdown_p2([p2, F.interpolate(p3_td, size=p2.shape[-2:], mode="nearest")])
+        p4_td = self.topdown_p5([p4, F.interpolate(p5, size=p4.shape[-2:], mode="nearest")])
+        p3_td = self.topdown_p4([p3, F.interpolate(p4_td, size=p3.shape[-2:], mode="nearest")])
+        p2_td = self.topdown_p3([p2, F.interpolate(p3_td, size=p2.shape[-2:], mode="nearest")])
+        p1_td = self.topdown_p2([p1, F.interpolate(p2_td, size=p1.shape[-2:], mode="nearest")])
 
-        p3_out = self.bottomup_p3([p3_td, self.downsample[0](p2_td)])
-        p4_out = self.bottomup_p4([p4_td, self.downsample[1](p3_out)])
-        p5_out = self.bottomup_p5([p5, self.downsample[2](p4_out)])
+        p2_out = self.bottomup_p2([p2_td, self.downsample[0](p1_td)])
+        p3_out = self.bottomup_p3([p3_td, self.downsample[1](p2_out)])
+        p4_out = self.bottomup_p4([p4_td, self.downsample[2](p3_out)])
+        p5_out = self.bottomup_p5([p5, self.downsample[3](p4_out)])
 
-        outputs = [p2_td, p3_out, p4_out, p5_out]
+        outputs = [p1_td, p2_out, p3_out, p4_out, p5_out]
         return tuple(block(feature) for block, feature in zip(self.refine, outputs))
 
 
@@ -232,7 +238,7 @@ class DetectionHead(nn.Module):
 
 
 class VSTDet(nn.Module):
-    strides = (4, 8, 16, 32)
+    strides = (2, 4, 8, 16, 32)
 
     def __init__(
         self,
@@ -250,13 +256,14 @@ class VSTDet(nn.Module):
         self.variant = variant
         self.backbone_name = backbone_name
         self.pretrained_backbone = pretrained_backbone
+        self.detail_stem = DetailStem(cfg.detail_channels)
 
         if backbone_name == "custom":
             self.backbone = VSTBackbone(cfg.channels, cfg.depths)
-            neck_in_channels = cfg.channels
+            neck_in_channels = (cfg.detail_channels, *cfg.channels)
         else:
             self.backbone = TorchvisionBackbone(backbone_name, pretrained=pretrained_backbone)
-            neck_in_channels = self.backbone.channels
+            neck_in_channels = (cfg.detail_channels, *self.backbone.channels)
 
         self.neck = BiFusionNeck(neck_in_channels, cfg.head_channels)
         self.head = DetectionHead(cfg.head_channels, num_classes, levels=len(self.strides))
@@ -266,8 +273,9 @@ class VSTDet(nn.Module):
             parameter.requires_grad = trainable
 
     def forward(self, images: torch.Tensor) -> dict[str, list[torch.Tensor] | tuple[int, ...]]:
+        detail = self.detail_stem(images)
         features = self.backbone(images)
-        pyramid = self.neck(features)
+        pyramid = self.neck((detail, *features))
         outputs = self.head(pyramid)
         outputs["strides"] = self.strides
         return outputs
