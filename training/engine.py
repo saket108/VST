@@ -72,7 +72,14 @@ def train_one_epoch(
 
         scaler.scale(losses.total).backward()
         scaler.unscale_(optimizer)
-        clip_grad_norm_(model.parameters(), max_norm=clip_grad)
+        grad_norm = clip_grad_norm_(model.parameters(), max_norm=clip_grad)
+        if not torch.isfinite(grad_norm):
+            progress.write(
+                f"warning: skipped optimizer step with non-finite grad norm ({grad_norm.item()})"
+            )
+            optimizer.zero_grad(set_to_none=True)
+            scaler.update()
+            continue
         scaler.step(optimizer)
         scaler.update()
 

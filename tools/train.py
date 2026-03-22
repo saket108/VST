@@ -69,6 +69,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument(
+        "--backbone-lr-scale",
+        type=float,
+        default=0.1,
+        help="Multiplier applied to the backbone learning rate relative to --lr.",
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output", default="runs/research_vstdet")
@@ -93,6 +99,28 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def build_optimizer(
+    model: VSTDet,
+    lr: float,
+    backbone_lr_scale: float,
+    weight_decay: float,
+) -> torch.optim.Optimizer:
+    backbone_params = list(model.backbone.parameters())
+    backbone_param_ids = {id(parameter) for parameter in backbone_params}
+    other_params = [
+        parameter
+        for parameter in model.parameters()
+        if id(parameter) not in backbone_param_ids
+    ]
+    return torch.optim.AdamW(
+        [
+            {"params": backbone_params, "lr": lr * backbone_lr_scale},
+            {"params": other_params, "lr": lr},
+        ],
+        weight_decay=weight_decay,
+    )
 
 
 def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, list[str]]:
@@ -138,7 +166,12 @@ def main() -> None:
     ).to(device)
     criterion = DetectionLoss(num_classes=len(names), strides=model.strides)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = build_optimizer(
+        model=model,
+        lr=args.lr,
+        backbone_lr_scale=args.backbone_lr_scale,
+        weight_decay=args.weight_decay,
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     amp_enabled = args.amp and device.type == "cuda"
     scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
@@ -154,6 +187,8 @@ def main() -> None:
         f"backbone={args.backbone}",
         f"pretrained_backbone={args.pretrained_backbone}",
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
+        f"backbone_lr_scale={args.backbone_lr_scale}",
+        f"amp={amp_enabled}",
     )
     print(f"\nStarting training for {args.epochs} epochs...")
 
