@@ -8,9 +8,9 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from model.detector import VSTDet
+from model.detector import VSTDet, decode_predictions
 from training.losses import DetectionLoss
-from utils.evaluator import evaluate_detection_metrics
+from utils.evaluator import DetectionMetricsAccumulator
 
 
 def move_targets_to_device(
@@ -117,8 +117,20 @@ def validate(
     model.eval()
     loss_sums = {"val_total": 0.0, "val_cls": 0.0, "val_box": 0.0, "val_center": 0.0}
     total_batches = 0
+    accumulator = DetectionMetricsAccumulator(
+        num_classes=model.num_classes,
+        class_names=class_names,
+    )
+    progress = tqdm(
+        loader,
+        total=len(loader),
+        leave=True,
+        dynamic_ncols=True,
+        desc="                 Class     Images  Instances  Precision     Recall      mAP50  mAP50-95",
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+    )
 
-    for images, targets in loader:
+    for images, targets in progress:
         images = images.to(device, non_blocking=True)
         targets = move_targets_to_device(targets, device)
         outputs = model(images)
@@ -127,21 +139,18 @@ def validate(
         loss_sums["val_cls"] += float(losses.cls.item())
         loss_sums["val_box"] += float(losses.box.item())
         loss_sums["val_center"] += float(losses.center.item())
+        predictions = decode_predictions(
+            outputs,
+            image_size=images.shape[-2:],
+            conf_threshold=conf_threshold,
+            nms_iou=nms_iou,
+            max_det=max_det,
+        )
+        accumulator.update(predictions, targets)
         total_batches += 1
 
     metrics = {key: value / max(total_batches, 1) for key, value in loss_sums.items()}
-    report = evaluate_detection_metrics(
-        model=model,
-        loader=loader,
-        device=device,
-        num_classes=model.num_classes,
-        class_names=class_names,
-        conf_threshold=conf_threshold,
-        nms_iou=nms_iou,
-        max_det=max_det,
-        show_progress=True,
-        progress_desc="                 Class     Images  Instances  Precision     Recall      mAP50  mAP50-95",
-    )
+    report = accumulator.compute()
     summary = report["summary"]
     metrics.update(
         {

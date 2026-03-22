@@ -149,6 +149,12 @@ def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, lis
     return train_loader, val_loader, train_set.config.names
 
 
+def format_metric_value(value: float) -> str:
+    if abs(value) < 1e-3 and value != 0.0:
+        return f"{value:.2e}"
+    return f"{value:.4f}"
+
+
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
@@ -208,11 +214,12 @@ def main() -> None:
             epochs=args.epochs,
             amp_enabled=amp_enabled,
         )
+        current_lr = max(float(group["lr"]) for group in optimizer.param_groups)
         scheduler.step()
 
         row: dict[str, float | int] = {
             "epoch": epoch,
-            "lr": float(optimizer.param_groups[0]["lr"]),
+            "lr": current_lr,
             **train_metrics,
         }
 
@@ -258,7 +265,7 @@ def main() -> None:
         append_history(history_path, row)
         epoch_time = time.time() - start
         summary = " ".join(
-            f"{key}={value:.4f}" for key, value in row.items() if isinstance(value, float)
+            f"{key}={format_metric_value(value)}" for key, value in row.items() if isinstance(value, float)
         )
         print(f"epoch {epoch:03d} {summary} time={epoch_time:.1f}s")
 
