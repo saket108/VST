@@ -18,7 +18,7 @@ This project uses a cleaner research-style layout instead of a flat script packa
 - pretrained `torchvision` backbones or the custom `ContextBridge` backbone
 - bidirectional weighted feature fusion neck
 - optional `CAFPN` neck for a stronger context-aware pyramid
-- decoupled classification, box, and centerness head
+- decoupled classification, box, and IoU-quality scoring head
 - FCOS-style or ATSS-style point assignment and GIoU-based regression loss
 - direct support for datasets in YOLO annotation format
 
@@ -88,6 +88,12 @@ Scratch-focused competitive detector:
 
 ```powershell
 python tools/train.py --config configs/vstdet_competitive_scratch_focus.yaml --data path\to\data.yaml
+```
+
+Fast-convergence scratch-focused detector:
+
+```powershell
+python tools/train.py --config configs/vstdet_competitive_scratch_fast.yaml --data path\to\data.yaml --autobatch
 ```
 
 Evaluate a saved checkpoint:

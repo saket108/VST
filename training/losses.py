@@ -27,6 +27,19 @@ def sigmoid_focal_loss(
     return focal
 
 
+def varifocal_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    alpha: float = 0.75,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    pred_sigmoid = logits.sigmoid()
+    weight = alpha * pred_sigmoid.pow(gamma) * (targets <= 0).to(logits.dtype)
+    weight = weight + targets * (targets > 0).to(logits.dtype)
+    loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    return loss * weight
+
+
 @dataclass
 class LossOutput:
     total: torch.Tensor
@@ -137,22 +150,22 @@ class DetectionLoss(nn.Module):
 
             cls_targets = pred_cls.new_zeros((points.shape[0], self.num_classes))
             pos_mask = assigned["labels"] >= 0
-            if pos_mask.any():
-                cls_targets[pos_mask, assigned["labels"][pos_mask]] = 1.0
-
-            cls_loss = cls_loss + sigmoid_focal_loss(pred_cls[batch_index], cls_targets).sum()
-            total_pos += int(pos_mask.sum().item())
 
             if pos_mask.any():
                 pred_boxes = distance_to_boxes(points[pos_mask], pred_box[batch_index][pos_mask])
                 target_boxes = assigned["boxes"][pos_mask]
+                iou_values = torch.diag(box_iou(pred_boxes, target_boxes)).detach().clamp_(0.0, 1.0)
+                cls_targets[pos_mask, assigned["labels"][pos_mask]] = iou_values
                 giou = generalized_box_iou(pred_boxes, target_boxes)
                 box_loss = box_loss + (1.0 - torch.diag(giou)).sum()
-                quality_loss = quality_loss + F.binary_cross_entropy_with_logits(
-                    pred_quality[batch_index][pos_mask],
-                    torch.diag(box_iou(pred_boxes, target_boxes)).detach().clamp_(0.0, 1.0),
+                quality_loss = quality_loss + F.mse_loss(
+                    pred_quality[batch_index][pos_mask].sigmoid(),
+                    iou_values,
                     reduction="sum",
                 )
+                total_pos += int(pos_mask.sum().item())
+
+            cls_loss = cls_loss + varifocal_loss(pred_cls[batch_index], cls_targets).sum()
 
         normalizer = max(total_pos, 1)
         cls_loss = cls_loss / normalizer

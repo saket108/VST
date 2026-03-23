@@ -435,20 +435,18 @@ def decode_predictions(
         image_scores: list[torch.Tensor] = []
         image_labels: list[torch.Tensor] = []
 
-        for cls_map, box_map, quality_map, stride in zip(
+        for cls_map, box_map, _, stride in zip(
             cls_levels, box_levels, quality_levels, strides
         ):
             _, num_classes, feat_h, feat_w = cls_map.shape
             points = build_points(feat_h, feat_w, stride, cls_map.device, cls_map.dtype)
 
             cls_scores = cls_map[batch_index].permute(1, 2, 0).reshape(-1, num_classes).sigmoid()
-            quality_scores = quality_map[batch_index].permute(1, 2, 0).reshape(-1).sigmoid()
             box_distances = (
                 box_map[batch_index].permute(1, 2, 0).reshape(-1, 4) * stride
             )
 
             scores, labels = cls_scores.max(dim=1)
-            scores = torch.sqrt(scores * quality_scores)
             keep = scores > conf_threshold
             if not keep.any():
                 continue
