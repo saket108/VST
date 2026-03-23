@@ -290,6 +290,7 @@ class DetectionHead(nn.Module):
         self.reg_tower = HeadTower(channels, depth=depth)
         self.cls_pred = nn.Conv2d(channels, num_classes, 3, padding=1)
         self.box_pred = nn.Conv2d(channels, 4, 3, padding=1)
+        # Keep the checkpoint-compatible parameter name, but train it as an IoU-aware quality branch.
         self.center_pred = nn.Conv2d(channels, 1, 3, padding=1)
         self.scales = nn.ModuleList([Scale() for _ in range(levels)])
         self._init_biases()
@@ -297,16 +298,18 @@ class DetectionHead(nn.Module):
     def _init_biases(self, prior_prob: float = 0.01) -> None:
         cls_bias = math.log(prior_prob / (1.0 - prior_prob))
         nn.init.constant_(self.cls_pred.bias, cls_bias)
-        nn.init.constant_(self.center_pred.bias, 0.0)
+        nn.init.constant_(self.center_pred.bias, math.log(0.1 / 0.9))
         nn.init.constant_(self.box_pred.bias, 1.0)
 
     def forward(self, features: tuple[torch.Tensor, ...]) -> dict[str, list[torch.Tensor]]:
-        outputs = {"cls": [], "box": [], "center": []}
+        outputs = {"cls": [], "box": [], "quality": [], "center": []}
         for feature, scale in zip(features, self.scales):
             cls_feat = self.cls_tower(feature)
             reg_feat = self.reg_tower(feature)
             outputs["cls"].append(self.cls_pred(cls_feat))
-            outputs["center"].append(self.center_pred(reg_feat))
+            quality_logits = self.center_pred(reg_feat)
+            outputs["quality"].append(quality_logits)
+            outputs["center"].append(quality_logits)
             # Keep regression in float32 even under AMP. Large positive logits can overflow
             # in float16 before softplus, which then corrupts GIoU with non-finite boxes.
             with torch.autocast(device_type=feature.device.type, enabled=False):
@@ -420,7 +423,7 @@ def decode_predictions(
 ) -> list[dict[str, torch.Tensor]]:
     cls_levels = outputs["cls"]  # type: ignore[index]
     box_levels = outputs["box"]  # type: ignore[index]
-    center_levels = outputs["center"]  # type: ignore[index]
+    quality_levels = outputs.get("quality", outputs["center"])  # type: ignore[index]
     strides = outputs["strides"]  # type: ignore[index]
 
     batch_size = cls_levels[0].shape[0]
@@ -432,20 +435,20 @@ def decode_predictions(
         image_scores: list[torch.Tensor] = []
         image_labels: list[torch.Tensor] = []
 
-        for cls_map, box_map, center_map, stride in zip(
-            cls_levels, box_levels, center_levels, strides
+        for cls_map, box_map, quality_map, stride in zip(
+            cls_levels, box_levels, quality_levels, strides
         ):
             _, num_classes, feat_h, feat_w = cls_map.shape
             points = build_points(feat_h, feat_w, stride, cls_map.device, cls_map.dtype)
 
             cls_scores = cls_map[batch_index].permute(1, 2, 0).reshape(-1, num_classes).sigmoid()
-            center_scores = center_map[batch_index].permute(1, 2, 0).reshape(-1).sigmoid()
+            quality_scores = quality_map[batch_index].permute(1, 2, 0).reshape(-1).sigmoid()
             box_distances = (
                 box_map[batch_index].permute(1, 2, 0).reshape(-1, 4) * stride
             )
 
             scores, labels = cls_scores.max(dim=1)
-            scores = torch.sqrt(scores * center_scores)
+            scores = torch.sqrt(scores * quality_scores)
             keep = scores > conf_threshold
             if not keep.any():
                 continue

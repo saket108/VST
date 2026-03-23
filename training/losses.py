@@ -32,7 +32,7 @@ class LossOutput:
     total: torch.Tensor
     cls: torch.Tensor
     box: torch.Tensor
-    center: torch.Tensor
+    quality: torch.Tensor
     positives: int
 
 
@@ -85,7 +85,7 @@ class DetectionLoss(nn.Module):
     ) -> LossOutput:
         cls_levels = outputs["cls"]  # type: ignore[index]
         box_levels = outputs["box"]  # type: ignore[index]
-        center_levels = outputs["center"]  # type: ignore[index]
+        quality_levels = outputs.get("quality", outputs["center"])  # type: ignore[index]
 
         batch_size = cls_levels[0].shape[0]
         device = cls_levels[0].device
@@ -93,23 +93,23 @@ class DetectionLoss(nn.Module):
 
         flat_cls: list[torch.Tensor] = []
         flat_box: list[torch.Tensor] = []
-        flat_center: list[torch.Tensor] = []
+        flat_quality: list[torch.Tensor] = []
         flat_points: list[torch.Tensor] = []
         flat_ranges: list[torch.Tensor] = []
         flat_strides: list[torch.Tensor] = []
 
-        for cls_map, box_map, center_map, stride, size_range in zip(
-            cls_levels, box_levels, center_levels, self.strides, self.size_ranges
+        for cls_map, box_map, quality_map, stride, size_range in zip(
+            cls_levels, box_levels, quality_levels, self.strides, self.size_ranges
         ):
             cls_map = cls_map.float()
             box_map = box_map.float()
-            center_map = center_map.float()
+            quality_map = quality_map.float()
             _, _, feat_h, feat_w = cls_map.shape
             points = build_points(feat_h, feat_w, stride, device, loss_dtype)
 
             flat_cls.append(cls_map.permute(0, 2, 3, 1).reshape(batch_size, -1, self.num_classes))
             flat_box.append(box_map.permute(0, 2, 3, 1).reshape(batch_size, -1, 4) * stride)
-            flat_center.append(center_map.permute(0, 2, 3, 1).reshape(batch_size, -1))
+            flat_quality.append(quality_map.permute(0, 2, 3, 1).reshape(batch_size, -1))
             flat_points.append(points)
             flat_ranges.append(
                 torch.tensor(size_range, device=device, dtype=loss_dtype).expand(points.shape[0], 2)
@@ -120,14 +120,14 @@ class DetectionLoss(nn.Module):
 
         pred_cls = torch.cat(flat_cls, dim=1)
         pred_box = torch.cat(flat_box, dim=1)
-        pred_center = torch.cat(flat_center, dim=1)
+        pred_quality = torch.cat(flat_quality, dim=1)
         points = torch.cat(flat_points, dim=0)
         size_ranges = torch.cat(flat_ranges, dim=0)
         strides = torch.cat(flat_strides, dim=0)
 
         cls_loss = pred_cls.new_tensor(0.0)
         box_loss = pred_cls.new_tensor(0.0)
-        center_loss = pred_cls.new_tensor(0.0)
+        quality_loss = pred_cls.new_tensor(0.0)
         total_pos = 0
 
         for batch_index, target in enumerate(targets):
@@ -148,18 +148,18 @@ class DetectionLoss(nn.Module):
                 target_boxes = assigned["boxes"][pos_mask]
                 giou = generalized_box_iou(pred_boxes, target_boxes)
                 box_loss = box_loss + (1.0 - torch.diag(giou)).sum()
-                center_loss = center_loss + F.binary_cross_entropy_with_logits(
-                    pred_center[batch_index][pos_mask],
-                    assigned["centerness"][pos_mask],
+                quality_loss = quality_loss + F.binary_cross_entropy_with_logits(
+                    pred_quality[batch_index][pos_mask],
+                    torch.diag(box_iou(pred_boxes, target_boxes)).detach().clamp_(0.0, 1.0),
                     reduction="sum",
                 )
 
         normalizer = max(total_pos, 1)
         cls_loss = cls_loss / normalizer
         box_loss = box_loss / normalizer
-        center_loss = center_loss / normalizer
-        total = cls_loss + box_loss + center_loss
-        return LossOutput(total=total, cls=cls_loss, box=box_loss, center=center_loss, positives=total_pos)
+        quality_loss = quality_loss / normalizer
+        total = cls_loss + box_loss + quality_loss
+        return LossOutput(total=total, cls=cls_loss, box=box_loss, quality=quality_loss, positives=total_pos)
 
     def _assign_targets(
         self,
@@ -185,10 +185,8 @@ class DetectionLoss(nn.Module):
         num_points = points.shape[0]
         labels = torch.full((num_points,), -1, dtype=torch.long, device=device)
         assigned_boxes = torch.zeros((num_points, 4), device=device, dtype=points.dtype)
-        centerness = torch.zeros((num_points,), device=device, dtype=points.dtype)
-
         if gt_boxes.numel() == 0:
-            return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
+            return {"labels": labels, "boxes": assigned_boxes}
 
         x = points[:, 0][:, None]
         y = points[:, 1][:, None]
@@ -243,21 +241,12 @@ class DetectionLoss(nn.Module):
         min_areas, matched_gt = areas.min(dim=1)
         pos_mask = torch.isfinite(min_areas)
         if not pos_mask.any():
-            return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
+            return {"labels": labels, "boxes": assigned_boxes}
 
         matched_boxes = gt_boxes[matched_gt[pos_mask]]
-        matched_regs = reg_targets[pos_mask, matched_gt[pos_mask]]
         labels[pos_mask] = gt_labels[matched_gt[pos_mask]]
         assigned_boxes[pos_mask] = matched_boxes.to(dtype=assigned_boxes.dtype)
-
-        lr_min = torch.minimum(matched_regs[:, 0], matched_regs[:, 2])
-        lr_max = torch.maximum(matched_regs[:, 0], matched_regs[:, 2]).clamp(min=1e-6)
-        tb_min = torch.minimum(matched_regs[:, 1], matched_regs[:, 3])
-        tb_max = torch.maximum(matched_regs[:, 1], matched_regs[:, 3]).clamp(min=1e-6)
-        centerness[pos_mask] = torch.sqrt((lr_min / lr_max) * (tb_min / tb_max)).to(
-            dtype=centerness.dtype
-        )
-        return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
+        return {"labels": labels, "boxes": assigned_boxes}
 
     def _assign_targets_atss(
         self,
@@ -270,10 +259,8 @@ class DetectionLoss(nn.Module):
         num_points = points.shape[0]
         labels = torch.full((num_points,), -1, dtype=torch.long, device=device)
         assigned_boxes = torch.zeros((num_points, 4), device=device, dtype=points.dtype)
-        centerness = torch.zeros((num_points,), device=device, dtype=points.dtype)
-
         if gt_boxes.numel() == 0:
-            return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
+            return {"labels": labels, "boxes": assigned_boxes}
 
         x = points[:, 0][:, None]
         y = points[:, 1][:, None]
@@ -339,18 +326,9 @@ class DetectionLoss(nn.Module):
 
         pos_mask = matched_gt >= 0
         if not pos_mask.any():
-            return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
+            return {"labels": labels, "boxes": assigned_boxes}
 
         matched_boxes = gt_boxes[matched_gt[pos_mask]]
-        matched_regs = reg_targets[pos_mask, matched_gt[pos_mask]]
         labels[pos_mask] = gt_labels[matched_gt[pos_mask]]
         assigned_boxes[pos_mask] = matched_boxes.to(dtype=assigned_boxes.dtype)
-
-        lr_min = torch.minimum(matched_regs[:, 0], matched_regs[:, 2])
-        lr_max = torch.maximum(matched_regs[:, 0], matched_regs[:, 2]).clamp(min=1e-6)
-        tb_min = torch.minimum(matched_regs[:, 1], matched_regs[:, 3])
-        tb_max = torch.maximum(matched_regs[:, 1], matched_regs[:, 3]).clamp(min=1e-6)
-        centerness[pos_mask] = torch.sqrt((lr_min / lr_max) * (tb_min / tb_max)).to(
-            dtype=centerness.dtype
-        )
-        return {"labels": labels, "boxes": assigned_boxes, "centerness": centerness}
+        return {"labels": labels, "boxes": assigned_boxes}

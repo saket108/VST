@@ -298,7 +298,7 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: torch.device,
-) -> tuple[int, float]:
+) -> tuple[int, float, int]:
     checkpoint_path = Path(path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -308,7 +308,8 @@ def load_checkpoint(
     scheduler.load_state_dict(checkpoint["scheduler_state"])
     start_epoch = int(checkpoint["epoch"]) + 1
     best_metric = float(checkpoint.get("best_metric", 0.0))
-    return start_epoch, best_metric
+    best_epoch = int(checkpoint.get("best_epoch", checkpoint["epoch"]))
+    return start_epoch, best_metric, best_epoch
 
 
 def main() -> None:
@@ -400,15 +401,19 @@ def main() -> None:
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
-    callbacks = build_default_callbacks(save_every=args.save_every)
+    callbacks = build_default_callbacks(
+        save_every=args.save_every,
+        results_summary_path=output_dir.parent / "results_summary.csv",
+    )
 
     start_epoch = 1
     best_map = 0.0
+    best_epoch = 0
     train_start = time.time()
     last_val_report: dict[str, object] | None = None
 
     if args.resume:
-        start_epoch, best_map = load_checkpoint(
+        start_epoch, best_map, best_epoch = load_checkpoint(
             path=args.resume,
             model=model,
             optimizer=optimizer,
@@ -446,7 +451,7 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs + 1):
         start = time.time()
         model.set_backbone_trainable(epoch > args.freeze_backbone_epochs)
-        print("\n      Epoch    GPU_mem   box_loss   cls_loss   ctr_loss  Instances       Size")
+        print("\n      Epoch    GPU_mem   box_loss   cls_loss  qual_loss  Instances       Size")
         current_val_report: dict[str, object] | None = None
         train_metrics = train_one_epoch(
             model=model,
@@ -492,6 +497,7 @@ def main() -> None:
             row=row,
             val_report=current_val_report,
             best_metric=best_map,
+            best_epoch=best_epoch,
             names=names,
             model=model,
             optimizer=optimizer,
@@ -499,6 +505,7 @@ def main() -> None:
         )
         callbacks.on_epoch_end(callback_state)
         best_map = callback_state.best_metric
+        best_epoch = callback_state.best_epoch
         _ = time.time() - start
 
     total_hours = (time.time() - train_start) / 3600.0
@@ -507,7 +514,25 @@ def main() -> None:
             epochs=args.epochs,
             output_dir=output_dir,
             total_hours=total_hours,
+            best_epoch=best_epoch,
+            best_metric=best_map,
             last_val_report=last_val_report,
+            run_metadata={
+                "config": args.config,
+                "data": args.data,
+                "device": device.type,
+                "variant": args.variant,
+                "backbone": args.backbone,
+                "neck": args.neck,
+                "head_depth": args.head_depth,
+                "detail_branch": args.detail_branch,
+                "assigner": args.assigner,
+                "imgsz": args.imgsz,
+                "batch_size": args.batch_size,
+                "class_aware_sampling": args.class_aware_sampling,
+                "sample_classes": args.sample_classes,
+                "sample_boost_factor": args.sample_boost_factor,
+            },
         )
     )
 

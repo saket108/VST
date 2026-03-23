@@ -17,6 +17,7 @@ from data.dataset import YoloDetectionDataset, collate_fn
 from model.detector import VSTDet
 from utils.evaluator import evaluate_detection_metrics, format_metrics_table
 from utils.plots import plot_per_class_metrics
+from utils.reporting import append_results_summary
 from utils.torch_utils import format_device_name, model_summary, resolve_device, seed_everything
 
 
@@ -162,6 +163,31 @@ def main() -> None:
     text_path.write_text("Evaluation report:\n" + table + "\n", encoding="utf-8")
     json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     plot_per_class_metrics(report, output_dir / f"eval_{args.split}_per_class_metrics.png")
+    summary = report["summary"]
+    append_results_summary(
+        output_dir.parent / "results_summary.csv",
+        {
+            "kind": "eval",
+            "run_name": output_dir.name,
+            "output_dir": output_dir,
+            "config": args.config,
+            "data": args.data,
+            "checkpoint": checkpoint_path,
+            "split": args.split,
+            "device": device.type,
+            "variant": model.variant,
+            "backbone": model.backbone_name,
+            "neck": model.neck_name,
+            "head_depth": model.head_depth,
+            "detail_branch": model.use_detail_branch,
+            "imgsz": args.imgsz,
+            "batch_size": args.batch_size,
+            "precision": summary["precision"],
+            "recall": summary["recall"],
+            "map50": summary["map50"],
+            "map50_95": summary["map50_95"],
+        },
+    )
     print(f"\nSaved evaluation artifacts to {output_dir}")
 
 

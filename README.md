@@ -28,6 +28,7 @@ This is a research baseline. The code is custom, but a paper contribution still 
 
 - `tools/train.py`: training entrypoint
 - `tools/eval.py`: checkpoint evaluation entrypoint
+- `tools/detect.py`: image inference and visualization entrypoint
 - `tools/autobatch.py`: GPU batch-size probe entrypoint
 - `model/detector.py`: architecture definition
 - `training/losses.py`: target assignment and losses
@@ -95,6 +96,12 @@ Evaluate a saved checkpoint:
 python tools/eval.py --checkpoint runs\research_vstdet\best.pt --config configs/vstdet_competitive_pure.yaml --data path\to\data.yaml
 ```
 
+Run inference on an image or folder:
+
+```powershell
+python tools/detect.py --checkpoint runs\research_vstdet\best.pt --source path\to\images --config configs/vstdet_competitive_pure.yaml
+```
+
 Probe a safe GPU batch size:
 
 ```powershell
@@ -113,6 +120,7 @@ Training runs now emit:
 - `training_curves.png`
 - `per_class_metrics.png`
 - `final_metrics.txt`
+- `results_summary.csv` in the parent output directory
 
 Lighter pretrained backbone:
 

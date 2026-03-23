@@ -9,6 +9,7 @@ from model.detector import VSTDet
 from training.engine import append_history, save_checkpoint
 from utils.evaluator import format_metrics_table
 from utils.plots import plot_history, plot_per_class_metrics
+from utils.reporting import append_results_summary
 
 
 @dataclass
@@ -19,6 +20,7 @@ class EpochCallbackState:
     row: dict[str, float | int]
     val_report: dict[str, object] | None
     best_metric: float
+    best_epoch: int
     names: list[str]
     model: VSTDet
     optimizer: torch.optim.Optimizer
@@ -30,7 +32,10 @@ class TrainEndState:
     epochs: int
     output_dir: Path
     total_hours: float
+    best_epoch: int
+    best_metric: float
     last_val_report: dict[str, object] | None
+    run_metadata: dict[str, object]
 
 
 class Callback:
@@ -62,6 +67,7 @@ class CheckpointCallback(Callback):
         metric = float(state.row.get("map50_95", float("-inf")))
         if state.val_report is not None and metric >= state.best_metric:
             state.best_metric = metric
+            state.best_epoch = state.epoch
             save_checkpoint(
                 state.output_dir / "best.pt",
                 state.model,
@@ -69,6 +75,7 @@ class CheckpointCallback(Callback):
                 state.scheduler,
                 state.epoch,
                 state.best_metric,
+                state.best_epoch,
                 state.names,
             )
 
@@ -80,6 +87,7 @@ class CheckpointCallback(Callback):
                 state.scheduler,
                 state.epoch,
                 state.best_metric,
+                state.best_epoch,
                 state.names,
             )
         save_checkpoint(
@@ -89,6 +97,7 @@ class CheckpointCallback(Callback):
             state.scheduler,
             state.epoch,
             state.best_metric,
+            state.best_epoch,
             state.names,
         )
 
@@ -103,6 +112,9 @@ class ArtifactCallback(Callback):
 
 
 class FinalReportCallback(Callback):
+    def __init__(self, results_summary_path: Path | None = None) -> None:
+        self.results_summary_path = results_summary_path
+
     def on_train_end(self, state: TrainEndState) -> None:
         print(f"\n{state.epochs} epochs completed in {state.total_hours:.3f} hours.")
         print(f"Results saved to {state.output_dir}")
@@ -114,13 +126,37 @@ class FinalReportCallback(Callback):
                 "Final checkpoint val:\n" + table + "\n",
                 encoding="utf-8",
             )
+            if self.results_summary_path is not None:
+                summary = state.last_val_report["summary"]
+                append_results_summary(
+                    self.results_summary_path,
+                    {
+                        **state.run_metadata,
+                        "kind": "train",
+                        "run_name": state.output_dir.name,
+                        "output_dir": state.output_dir,
+                        "best_checkpoint": state.output_dir / "best.pt",
+                        "last_checkpoint": state.output_dir / "last.pt",
+                        "epochs": state.epochs,
+                        "best_epoch": state.best_epoch,
+                        "best_metric": state.best_metric,
+                        "total_hours": state.total_hours,
+                        "precision": summary["precision"],
+                        "recall": summary["recall"],
+                        "map50": summary["map50"],
+                        "map50_95": summary["map50_95"],
+                    },
+                )
 
 
-def build_default_callbacks(save_every: int) -> CallbackManager:
+def build_default_callbacks(
+    save_every: int,
+    results_summary_path: Path | None = None,
+) -> CallbackManager:
     return CallbackManager(
         callbacks=[
             CheckpointCallback(save_every=save_every),
             ArtifactCallback(),
-            FinalReportCallback(),
+            FinalReportCallback(results_summary_path=results_summary_path),
         ]
     )

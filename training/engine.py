@@ -20,11 +20,11 @@ HISTORY_FIELDS = [
     "total",
     "cls",
     "box",
-    "center",
+    "quality",
     "val_total",
     "val_cls",
     "val_box",
-    "val_center",
+    "val_quality",
     "precision",
     "recall",
     "map50",
@@ -51,7 +51,7 @@ def train_one_epoch(
     amp_enabled: bool,
 ) -> dict[str, float]:
     model.train()
-    loss_sums = {"total": 0.0, "cls": 0.0, "box": 0.0, "center": 0.0}
+    loss_sums = {"total": 0.0, "cls": 0.0, "box": 0.0, "quality": 0.0}
     total_batches = 0
 
     progress = tqdm(
@@ -73,12 +73,12 @@ def train_one_epoch(
 
         if not all(
             torch.isfinite(metric).all()
-            for metric in (losses.total, losses.cls, losses.box, losses.center)
+            for metric in (losses.total, losses.cls, losses.box, losses.quality)
         ):
             progress.write(
                 "warning: skipped batch with non-finite loss "
                 f"(total={losses.total.item()}, cls={losses.cls.item()}, "
-                f"box={losses.box.item()}, center={losses.center.item()})"
+                f"box={losses.box.item()}, quality={losses.quality.item()})"
             )
             continue
 
@@ -98,17 +98,17 @@ def train_one_epoch(
         loss_sums["total"] += float(losses.total.item())
         loss_sums["cls"] += float(losses.cls.item())
         loss_sums["box"] += float(losses.box.item())
-        loss_sums["center"] += float(losses.center.item())
+        loss_sums["quality"] += float(losses.quality.item())
         total_batches += 1
 
         avg_box = loss_sums["box"] / total_batches
         avg_cls = loss_sums["cls"] / total_batches
-        avg_center = loss_sums["center"] / total_batches
+        avg_quality = loss_sums["quality"] / total_batches
         instances = sum(int(target["labels"].numel()) for target in targets)
         size = int(images.shape[-1])
         progress.set_description(
             f"{epoch:>9}/{epochs:<3} {format_device_memory(device):>9} "
-            f"{avg_box:>10.3f} {avg_cls:>10.3f} {avg_center:>10.3f} "
+            f"{avg_box:>10.3f} {avg_cls:>10.3f} {avg_quality:>10.3f} "
             f"{instances:>10} {size:>10}"
         )
 
@@ -128,7 +128,7 @@ def validate(
     stage_label: str = "Epoch val",
 ) -> tuple[dict[str, float], dict[str, object]]:
     model.eval()
-    loss_sums = {"val_total": 0.0, "val_cls": 0.0, "val_box": 0.0, "val_center": 0.0}
+    loss_sums = {"val_total": 0.0, "val_cls": 0.0, "val_box": 0.0, "val_quality": 0.0}
     total_batches = 0
     accumulator = DetectionMetricsAccumulator(
         num_classes=model.num_classes,
@@ -151,7 +151,7 @@ def validate(
         loss_sums["val_total"] += float(losses.total.item())
         loss_sums["val_cls"] += float(losses.cls.item())
         loss_sums["val_box"] += float(losses.box.item())
-        loss_sums["val_center"] += float(losses.center.item())
+        loss_sums["val_quality"] += float(losses.quality.item())
         predictions = decode_predictions(
             outputs,
             image_size=images.shape[-2:],
@@ -184,6 +184,7 @@ def save_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     epoch: int,
     best_metric: float,
+    best_epoch: int,
     names: list[str],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,6 +192,7 @@ def save_checkpoint(
         {
             "epoch": epoch,
             "best_metric": best_metric,
+            "best_epoch": best_epoch,
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "scheduler_state": scheduler.state_dict(),

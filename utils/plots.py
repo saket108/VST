@@ -38,6 +38,17 @@ def _series(rows: list[dict[str, str]], key: str) -> tuple[list[float], list[flo
     return x_values, y_values
 
 
+def _series_with_fallback(
+    rows: list[dict[str, str]],
+    key: str,
+    fallback: str | None = None,
+) -> tuple[list[float], list[float]]:
+    xs, ys = _series(rows, key)
+    if xs or fallback is None:
+        return xs, ys
+    return _series(rows, fallback)
+
+
 def plot_history(history_path: str | Path, output_path: str | Path) -> Path | None:
     if plt is None:
         return None
@@ -57,9 +68,9 @@ def plot_history(history_path: str | Path, output_path: str | Path) -> Path | No
         ("total", "train total", "#1f77b4"),
         ("cls", "train cls", "#ff7f0e"),
         ("box", "train box", "#2ca02c"),
-        ("center", "train center", "#d62728"),
+        ("quality", "train quality", "#d62728"),
     ):
-        xs, ys = _series(rows, key)
+        xs, ys = _series_with_fallback(rows, key, "center" if key == "quality" else None)
         if xs:
             loss_axis.plot(xs, ys, label=label, color=color, linewidth=2)
     loss_axis.set_title("Train Loss")
@@ -73,9 +84,13 @@ def plot_history(history_path: str | Path, output_path: str | Path) -> Path | No
         ("val_total", "val total", "#1f77b4"),
         ("val_cls", "val cls", "#ff7f0e"),
         ("val_box", "val box", "#2ca02c"),
-        ("val_center", "val center", "#d62728"),
+        ("val_quality", "val quality", "#d62728"),
     ):
-        xs, ys = _series(rows, key)
+        xs, ys = _series_with_fallback(
+            rows,
+            key,
+            "val_center" if key == "val_quality" else None,
+        )
         if xs:
             val_loss_axis.plot(xs, ys, label=label, color=color, linewidth=2)
     val_loss_axis.set_title("Validation Loss")
