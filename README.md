@@ -83,6 +83,12 @@ Competitive pure detector:
 python tools/train.py --config configs/vstdet_competitive_pure.yaml --data path\to\data.yaml
 ```
 
+Scratch-focused competitive detector:
+
+```powershell
+python tools/train.py --config configs/vstdet_competitive_scratch_focus.yaml --data path\to\data.yaml
+```
+
 Evaluate a saved checkpoint:
 
 ```powershell

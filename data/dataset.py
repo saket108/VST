@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 import random
+from collections import Counter
 
 import numpy as np
 import torch
@@ -146,6 +147,23 @@ def load_yolo_labels(label_path: Path, width: int, height: int) -> tuple[torch.T
     if not boxes:
         return torch.zeros((0, 4), dtype=torch.float32), torch.zeros((0,), dtype=torch.long)
     return torch.tensor(boxes, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
+
+
+def load_label_class_ids(label_path: Path) -> list[int]:
+    if not label_path.exists():
+        return []
+
+    class_ids: list[int] = []
+    with label_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            try:
+                class_ids.append(int(float(parts[0])))
+            except ValueError:
+                continue
+    return class_ids
 
 
 def resize_and_pad(
@@ -437,12 +455,40 @@ class YoloDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]
         if entry is None:
             raise ValueError(f"Split '{split}' is not configured in dataset YAML: {yaml_path}")
         self.image_paths = resolve_split_paths(self.config.root, entry)
+        self.label_paths = [image_to_label_path(path) for path in self.image_paths]
         self.image_size = image_size
         self.augment = augment
         self.augment_config = augment_config or AugmentConfig()
+        self._label_class_counts: list[Counter[int]] | None = None
 
     def __len__(self) -> int:
         return len(self.image_paths)
+
+    def get_label_class_counts(self) -> list[Counter[int]]:
+        if self._label_class_counts is None:
+            self._label_class_counts = [
+                Counter(load_label_class_ids(label_path))
+                for label_path in self.label_paths
+            ]
+        return self._label_class_counts
+
+    def build_sampling_weights(
+        self,
+        target_classes: list[int],
+        boost_factor: float = 4.0,
+    ) -> torch.Tensor:
+        if not target_classes:
+            return torch.ones(len(self.image_paths), dtype=torch.double)
+
+        target_class_set = set(target_classes)
+        weights: list[float] = []
+        for class_counts in self.get_label_class_counts():
+            target_instances = sum(
+                count for class_id, count in class_counts.items() if class_id in target_class_set
+            )
+            weight = 1.0 + boost_factor * float(target_instances)
+            weights.append(weight)
+        return torch.tensor(weights, dtype=torch.double)
 
     def _load_image_target(
         self,

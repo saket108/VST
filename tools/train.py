@@ -10,7 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 import yaml
 
 from data.dataset import AugmentConfig, YoloDetectionDataset, collate_fn
@@ -164,6 +164,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--nms-iou", type=float, default=0.6)
     parser.add_argument("--max-det", type=int, default=300)
+    parser.add_argument(
+        "--class-aware-sampling",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Oversample images containing selected classes using a weighted sampler.",
+    )
+    parser.add_argument(
+        "--sample-classes",
+        default="",
+        help="Comma-separated class names or ids to boost when class-aware sampling is enabled.",
+    )
+    parser.add_argument(
+        "--sample-boost-factor",
+        type=float,
+        default=4.0,
+        help="Extra sampling weight added per target-class instance.",
+    )
     parser.set_defaults(**config_defaults)
     return parser.parse_args()
 
@@ -225,13 +242,15 @@ def build_loaders(
     args: argparse.Namespace,
     train_set: YoloDetectionDataset,
     val_set: YoloDetectionDataset,
+    train_sampler: WeightedRandomSampler | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     pin_memory = resolve_device(args.device).type == "cuda"
 
     train_loader = DataLoader(
         train_set,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=args.workers,
         pin_memory=pin_memory,
         collate_fn=collate_fn,
@@ -247,6 +266,30 @@ def build_loaders(
         persistent_workers=args.workers > 0,
     )
     return train_loader, val_loader
+
+
+def resolve_sample_class_ids(names: list[str], spec: str) -> list[int]:
+    resolved: list[int] = []
+    if spec.strip():
+        name_to_id = {name.lower(): index for index, name in enumerate(names)}
+        for token in spec.split(","):
+            item = token.strip()
+            if not item:
+                continue
+            if item.isdigit():
+                class_id = int(item)
+                if not 0 <= class_id < len(names):
+                    raise ValueError(f"sample class id {class_id} is out of range for {len(names)} classes.")
+                resolved.append(class_id)
+                continue
+            lookup = name_to_id.get(item.lower())
+            if lookup is None:
+                raise ValueError(f"Unknown sample class '{item}'. Expected one of: {', '.join(names)}")
+            resolved.append(lookup)
+    else:
+        default_targets = {"scratch", "missing-head"}
+        resolved = [index for index, name in enumerate(names) if name in default_targets]
+    return sorted(set(resolved))
 
 
 def load_checkpoint(
@@ -295,6 +338,7 @@ def main() -> None:
         atss_topk=args.atss_topk,
     )
     amp_enabled = args.amp and device.type == "cuda"
+    train_sampler: WeightedRandomSampler | None = None
 
     if args.autobatch:
         if device.type != "cuda":
@@ -323,7 +367,30 @@ def main() -> None:
             )
             print("autobatch attempts", attempts)
 
-    train_loader, val_loader = build_loaders(args, train_set, val_set)
+    if args.class_aware_sampling:
+        sample_class_ids = resolve_sample_class_ids(names, args.sample_classes)
+        if sample_class_ids:
+            weights = train_set.build_sampling_weights(
+                target_classes=sample_class_ids,
+                boost_factor=args.sample_boost_factor,
+            )
+            train_sampler = WeightedRandomSampler(
+                weights=weights,
+                num_samples=len(weights),
+                replacement=True,
+            )
+            boosted_images = int((weights > 1.0).sum().item())
+            sample_class_names = ", ".join(names[class_id] for class_id in sample_class_ids)
+            print(
+                "class_aware_sampling",
+                f"classes={sample_class_names}",
+                f"boost_factor={args.sample_boost_factor}",
+                f"boosted_images={boosted_images}/{len(weights)}",
+            )
+        else:
+            print("class_aware_sampling skipped: no matching classes were resolved.")
+
+    train_loader, val_loader = build_loaders(args, train_set, val_set, train_sampler=train_sampler)
 
     optimizer = build_optimizer(
         model=model,
@@ -366,6 +433,7 @@ def main() -> None:
         f"mosaic={args.mosaic}",
         f"mixup={args.mixup}",
         f"copy_paste={args.copy_paste}",
+        f"class_aware_sampling={args.class_aware_sampling}",
         f"batch_size={args.batch_size}",
         f"amp={amp_enabled}",
     )
