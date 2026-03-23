@@ -274,6 +274,69 @@ class CAFPNNeck(nn.Module):
         return tuple(block(feature) for block, feature in zip(self.refine, outputs))
 
 
+class CAFPNP2Neck(nn.Module):
+    def __init__(self, in_channels: tuple[int, ...], out_channels: int) -> None:
+        super().__init__()
+        if len(in_channels) != 5:
+            raise ValueError("CAFPNP2Neck expects a detail feature plus four backbone levels.")
+
+        self.lateral = nn.ModuleList(
+            [ConvBNAct(ch, out_channels, kernel_size=1) for ch in in_channels]
+        )
+        self.downsample = nn.ModuleList(
+            [ConvBNAct(out_channels, out_channels, stride=2) for _ in range(4)]
+        )
+        self.context_inject = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.AdaptiveAvgPool2d(1),
+                    nn.Conv2d(out_channels, out_channels, 1),
+                    nn.Sigmoid(),
+                )
+                for _ in range(5)
+            ]
+        )
+
+        self.topdown_p4 = ContextAwareFusion(out_channels, inputs=2)
+        self.topdown_p3 = ContextAwareFusion(out_channels, inputs=2)
+        self.topdown_p2 = ContextAwareFusion(out_channels, inputs=2)
+        self.topdown_p1 = ContextAwareFusion(out_channels, inputs=2)
+        self.bottomup_p2 = ContextAwareFusion(out_channels, inputs=2)
+        self.bottomup_p3 = ContextAwareFusion(out_channels, inputs=2)
+        self.bottomup_p4 = ContextAwareFusion(out_channels, inputs=2)
+        self.bottomup_p5 = ContextAwareFusion(out_channels, inputs=2)
+        self.refine = nn.ModuleList([ContextBridge(out_channels) for _ in range(5)])
+
+    def _apply_context(self, feature: torch.Tensor, context: torch.Tensor, index: int) -> torch.Tensor:
+        gate = self.context_inject[index](context)
+        return feature * gate + feature
+
+    def forward(self, features: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+        p1, p2, p3, p4, p5 = [layer(x) for layer, x in zip(self.lateral, features)]
+        global_context = p5
+
+        p4_td = self.topdown_p4([p4, F.interpolate(p5, size=p4.shape[-2:], mode="nearest")])
+        p4_td = self._apply_context(p4_td, global_context, 3)
+
+        p3_td = self.topdown_p3([p3, F.interpolate(p4_td, size=p3.shape[-2:], mode="nearest")])
+        p3_td = self._apply_context(p3_td, global_context, 2)
+
+        p2_td = self.topdown_p2([p2, F.interpolate(p3_td, size=p2.shape[-2:], mode="nearest")])
+        p2_td = self._apply_context(p2_td, global_context, 1)
+
+        p1_td = self.topdown_p1([p1, F.interpolate(p2_td, size=p1.shape[-2:], mode="nearest")])
+        p1_td = self._apply_context(p1_td, global_context, 0)
+
+        p2_out = self.bottomup_p2([p2_td, self.downsample[0](p1_td)])
+        p3_out = self.bottomup_p3([p3_td, self.downsample[1](p2_out)])
+        p4_out = self.bottomup_p4([p4_td, self.downsample[2](p3_out)])
+        p5_out = self.bottomup_p5([p5, self.downsample[3](p4_out)])
+        p5_out = self._apply_context(p5_out, global_context, 4)
+
+        outputs = [p1_td, p2_out, p3_out, p4_out, p5_out]
+        return tuple(block(feature) for block, feature in zip(self.refine, outputs))
+
+
 class HeadTower(nn.Sequential):
     def __init__(self, channels: int, depth: int = 2) -> None:
         layers: list[nn.Module] = []
@@ -333,6 +396,8 @@ class VSTDet(nn.Module):
         super().__init__()
         if variant not in VARIANTS:
             raise ValueError(f"Unknown variant '{variant}'. Expected one of {sorted(VARIANTS)}.")
+        if use_detail_branch and neck_name == "cafpn_p2":
+            raise ValueError("neck='cafpn_p2' already enables a stride-2 detail path.")
 
         cfg = VARIANTS[variant]
         self.num_classes = num_classes
@@ -342,21 +407,22 @@ class VSTDet(nn.Module):
         self.neck_name = neck_name
         self.head_depth = head_depth
         self.use_detail_branch = use_detail_branch
-        self.strides = (2, 4, 8, 16, 32) if use_detail_branch else (4, 8, 16, 32)
-        self.detail_stem = DetailStem(cfg.detail_channels) if use_detail_branch else None
+        self.uses_stride2_path = use_detail_branch or neck_name == "cafpn_p2"
+        self.strides = (2, 4, 8, 16, 32) if self.uses_stride2_path else (4, 8, 16, 32)
+        self.detail_stem = DetailStem(cfg.detail_channels) if self.uses_stride2_path else None
 
         if backbone_name == "custom":
             self.backbone = VSTBackbone(cfg.channels, cfg.depths)
             neck_in_channels = (
                 (cfg.detail_channels, *cfg.channels)
-                if use_detail_branch
+                if self.uses_stride2_path
                 else cfg.channels
             )
         else:
             self.backbone = TorchvisionBackbone(backbone_name, pretrained=pretrained_backbone)
             neck_in_channels = (
                 (cfg.detail_channels, *self.backbone.channels)
-                if use_detail_branch
+                if self.uses_stride2_path
                 else self.backbone.channels
             )
 
@@ -366,8 +432,12 @@ class VSTDet(nn.Module):
             if use_detail_branch:
                 raise ValueError("CAFPN neck does not support detail_branch.")
             self.neck = CAFPNNeck(neck_in_channels, cfg.head_channels)
+        elif neck_name == "cafpn_p2":
+            self.neck = CAFPNP2Neck(neck_in_channels, cfg.head_channels)
         else:
-            raise ValueError(f"Unknown neck '{neck_name}'. Expected 'bifusion' or 'cafpn'.")
+            raise ValueError(
+                f"Unknown neck '{neck_name}'. Expected 'bifusion', 'cafpn', or 'cafpn_p2'."
+            )
         self.head = DetectionHead(
             cfg.head_channels,
             num_classes,
@@ -381,7 +451,7 @@ class VSTDet(nn.Module):
 
     def forward(self, images: torch.Tensor) -> dict[str, list[torch.Tensor] | tuple[int, ...]]:
         features = self.backbone(images)
-        if self.use_detail_branch:
+        if self.uses_stride2_path:
             assert self.detail_stem is not None
             detail = self.detail_stem(images)
             pyramid = self.neck((detail, *features))
