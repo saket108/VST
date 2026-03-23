@@ -27,9 +27,12 @@ This is a research baseline. The code is custom, but a paper contribution still 
 ## Main files
 
 - `tools/train.py`: training entrypoint
+- `tools/eval.py`: checkpoint evaluation entrypoint
+- `tools/autobatch.py`: GPU batch-size probe entrypoint
 - `model/detector.py`: architecture definition
 - `training/losses.py`: target assignment and losses
 - `training/engine.py`: training and validation loop
+- `training/callbacks.py`: checkpointing, plots, history, and final-report hooks
 - `data/dataset.py`: YOLO-format dataset loader
 - `utils/evaluator.py`: lightweight `mAP50` and `mAP50-95`
 
@@ -79,6 +82,31 @@ Competitive pure detector:
 ```powershell
 python tools/train.py --config configs/vstdet_competitive_pure.yaml --data path\to\data.yaml
 ```
+
+Evaluate a saved checkpoint:
+
+```powershell
+python tools/eval.py --checkpoint runs\research_vstdet\best.pt --config configs/vstdet_competitive_pure.yaml --data path\to\data.yaml
+```
+
+Probe a safe GPU batch size:
+
+```powershell
+python tools/autobatch.py --config configs/vstdet_competitive_pure.yaml --data path\to\data.yaml
+```
+
+Or let training probe automatically before it builds dataloaders:
+
+```powershell
+python tools/train.py --config configs/vstdet_competitive_pure.yaml --data path\to\data.yaml --autobatch
+```
+
+Training runs now emit:
+
+- `history.csv`
+- `training_curves.png`
+- `per_class_metrics.png`
+- `final_metrics.txt`
 
 Lighter pretrained backbone:
 

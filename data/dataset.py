@@ -22,6 +22,7 @@ class DatasetConfig:
     root: Path
     train: object
     val: object
+    test: object | None
     names: list[str]
 
     @property
@@ -64,7 +65,13 @@ def load_dataset_config(path: str | Path) -> DatasetConfig:
         count = int(data["nc"])
         ordered = [f"class_{index}" for index in range(count)]
 
-    return DatasetConfig(root=root, train=data["train"], val=data["val"], names=ordered)
+    return DatasetConfig(
+        root=root,
+        train=data["train"],
+        val=data["val"],
+        test=data.get("test"),
+        names=ordered,
+    )
 
 
 def resolve_split_paths(root: Path, entry: object) -> list[Path]:
@@ -426,7 +433,9 @@ class YoloDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]
     ) -> None:
         super().__init__()
         self.config = load_dataset_config(yaml_path)
-        entry = getattr(self.config, split)
+        entry = getattr(self.config, split, None)
+        if entry is None:
+            raise ValueError(f"Split '{split}' is not configured in dataset YAML: {yaml_path}")
         self.image_paths = resolve_split_paths(self.config.root, entry)
         self.image_size = image_size
         self.augment = augment

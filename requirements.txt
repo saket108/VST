@@ -3,3 +3,4 @@ torchvision
 Pillow
 PyYAML
 tqdm
+matplotlib

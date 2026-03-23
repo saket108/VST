@@ -11,19 +11,31 @@ from tqdm.auto import tqdm
 from model.detector import VSTDet, decode_predictions
 from training.losses import DetectionLoss
 from utils.evaluator import DetectionMetricsAccumulator, format_summary_row
+from utils.torch_utils import format_device_memory
+
+
+HISTORY_FIELDS = [
+    "epoch",
+    "lr",
+    "total",
+    "cls",
+    "box",
+    "center",
+    "val_total",
+    "val_cls",
+    "val_box",
+    "val_center",
+    "precision",
+    "recall",
+    "map50",
+    "map50_95",
+]
 
 
 def move_targets_to_device(
     targets: list[dict[str, torch.Tensor]], device: torch.device
 ) -> list[dict[str, torch.Tensor]]:
     return [{key: value.to(device) for key, value in target.items()} for target in targets]
-
-
-def format_device_memory(device: torch.device) -> str:
-    if device.type != "cuda":
-        return "0G"
-    memory_gb = torch.cuda.memory_reserved(device=device) / (1024**3)
-    return f"{memory_gb:.2f}G"
 
 
 def train_one_epoch(
@@ -187,6 +199,7 @@ def save_checkpoint(
             "neck_name": model.neck_name,
             "head_depth": model.head_depth,
             "pretrained_backbone": model.pretrained_backbone,
+            "use_detail_branch": model.use_detail_branch,
             "num_classes": model.num_classes,
             "names": names,
         },
@@ -198,7 +211,7 @@ def append_history(path: Path, row: dict[str, float | int]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     file_exists = path.exists()
     with path.open("a", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(row))
+        writer = csv.DictWriter(handle, fieldnames=HISTORY_FIELDS, extrasaction="ignore")
         if not file_exists:
             writer.writeheader()
-        writer.writerow(row)
+        writer.writerow({field: row.get(field, "") for field in HISTORY_FIELDS})

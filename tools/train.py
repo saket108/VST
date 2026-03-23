@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import random
 import sys
 import time
 
@@ -16,9 +15,11 @@ import yaml
 
 from data.dataset import AugmentConfig, YoloDetectionDataset, collate_fn
 from model.detector import VSTDet
-from training.engine import append_history, save_checkpoint, train_one_epoch, validate
+from training import EpochCallbackState, TrainEndState, build_default_callbacks
+from training.engine import train_one_epoch, validate
 from training.losses import DetectionLoss
-from utils.evaluator import format_metrics_table
+from utils.autobatch import estimate_autobatch_size
+from utils.torch_utils import format_device_name, model_summary, resolve_device, seed_everything
 
 
 def load_config_defaults(config_path: str | None) -> dict:
@@ -79,6 +80,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=896, help="Square training size.")
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument(
+        "--autobatch",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Probe a safe GPU batch size before building the dataloaders.",
+    )
+    parser.add_argument(
+        "--autobatch-max",
+        type=int,
+        default=64,
+        help="Highest candidate batch size to test when --autobatch is enabled.",
+    )
     parser.add_argument("--head-depth", type=int, default=2)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -154,13 +167,6 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(**config_defaults)
     return parser.parse_args()
 
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-
 def build_augment_config(args: argparse.Namespace) -> AugmentConfig:
     return AugmentConfig(
         copy_paste=args.copy_paste,
@@ -201,7 +207,9 @@ def build_optimizer(
     )
 
 
-def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, list[str]]:
+def build_datasets(
+    args: argparse.Namespace,
+) -> tuple[YoloDetectionDataset, YoloDetectionDataset, list[str]]:
     train_set = YoloDetectionDataset(
         args.data,
         split="train",
@@ -210,7 +218,15 @@ def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, lis
         augment_config=build_augment_config(args),
     )
     val_set = YoloDetectionDataset(args.data, split="val", image_size=args.imgsz, augment=False)
-    pin_memory = torch.device(args.device).type == "cuda"
+    return train_set, val_set, train_set.config.names
+
+
+def build_loaders(
+    args: argparse.Namespace,
+    train_set: YoloDetectionDataset,
+    val_set: YoloDetectionDataset,
+) -> tuple[DataLoader, DataLoader]:
+    pin_memory = resolve_device(args.device).type == "cuda"
 
     train_loader = DataLoader(
         train_set,
@@ -230,7 +246,7 @@ def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, lis
         collate_fn=collate_fn,
         persistent_workers=args.workers > 0,
     )
-    return train_loader, val_loader, train_set.config.names
+    return train_loader, val_loader
 
 
 def load_checkpoint(
@@ -254,13 +270,13 @@ def load_checkpoint(
 
 def main() -> None:
     args = parse_args()
-    set_seed(args.seed)
+    seed_everything(args.seed)
 
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_loader, val_loader, names = build_loaders(args)
+    train_set, val_set, names = build_datasets(args)
     model = VSTDet(
         num_classes=len(names),
         variant=args.variant,
@@ -278,6 +294,36 @@ def main() -> None:
         topk_candidates=args.topk_candidates,
         atss_topk=args.atss_topk,
     )
+    amp_enabled = args.amp and device.type == "cuda"
+
+    if args.autobatch:
+        if device.type != "cuda":
+            print("autobatch skipped: CUDA is required for GPU memory probing.")
+        else:
+            probe_trainable_backbone = args.freeze_backbone_epochs < args.epochs
+            result = estimate_autobatch_size(
+                model=model,
+                criterion=criterion,
+                dataset=train_set,
+                collate=collate_fn,
+                device=device,
+                max_batch_size=args.autobatch_max,
+                amp_enabled=amp_enabled,
+                trainable_backbone=probe_trainable_backbone,
+            )
+            args.batch_size = result.batch_size
+            attempts = ", ".join(
+                f"{batch}:{'ok' if success else 'oom'}" for batch, success in result.tried
+            )
+            print(
+                "autobatch",
+                f"recommended_batch_size={args.batch_size}",
+                f"trainable_backbone={probe_trainable_backbone}",
+                f"reserved_memory={result.device_memory}",
+            )
+            print("autobatch attempts", attempts)
+
+    train_loader, val_loader = build_loaders(args, train_set, val_set)
 
     optimizer = build_optimizer(
         model=model,
@@ -286,12 +332,11 @@ def main() -> None:
         weight_decay=args.weight_decay,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    amp_enabled = args.amp and device.type == "cuda"
     scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
+    callbacks = build_default_callbacks(save_every=args.save_every)
 
     start_epoch = 1
     best_map = 0.0
-    history_path = output_dir / "history.csv"
     train_start = time.time()
     last_val_report: dict[str, object] | None = None
 
@@ -321,8 +366,11 @@ def main() -> None:
         f"mosaic={args.mosaic}",
         f"mixup={args.mixup}",
         f"copy_paste={args.copy_paste}",
+        f"batch_size={args.batch_size}",
         f"amp={amp_enabled}",
     )
+    print("device", f"name={format_device_name(device)}", f"type={device.type}")
+    print("model", model_summary(model))
     if args.resume:
         print(f"resuming from {args.resume} at epoch {start_epoch}")
     print(f"\nStarting training for {args.epochs} epochs...")
@@ -331,6 +379,7 @@ def main() -> None:
         start = time.time()
         model.set_backbone_trainable(epoch > args.freeze_backbone_epochs)
         print("\n      Epoch    GPU_mem   box_loss   cls_loss   ctr_loss  Instances       Size")
+        current_val_report: dict[str, object] | None = None
         train_metrics = train_one_epoch(
             model=model,
             loader=train_loader,
@@ -366,48 +415,33 @@ def main() -> None:
             )
             row.update(val_metrics)
             last_val_report = val_report
+            current_val_report = val_report
 
-            if val_metrics["map50_95"] >= best_map:
-                best_map = val_metrics["map50_95"]
-                save_checkpoint(
-                    output_dir / "best.pt",
-                    model,
-                    optimizer,
-                    scheduler,
-                    epoch,
-                    best_map,
-                    names,
-                )
-
-        if epoch % args.save_every == 0 or epoch == args.epochs:
-            save_checkpoint(
-                output_dir / f"epoch_{epoch:03d}.pt",
-                model,
-                optimizer,
-                scheduler,
-                epoch,
-                best_map,
-                names,
-            )
-        save_checkpoint(
-            output_dir / "last.pt",
-            model,
-            optimizer,
-            scheduler,
-            epoch,
-            best_map,
-            names,
+        callback_state = EpochCallbackState(
+            epoch=epoch,
+            epochs=args.epochs,
+            output_dir=output_dir,
+            row=row,
+            val_report=current_val_report,
+            best_metric=best_map,
+            names=names,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
         )
-
-        append_history(history_path, row)
+        callbacks.on_epoch_end(callback_state)
+        best_map = callback_state.best_metric
         _ = time.time() - start
 
     total_hours = (time.time() - train_start) / 3600.0
-    print(f"\n{args.epochs} epochs completed in {total_hours:.3f} hours.")
-    print(f"Results saved to {output_dir}")
-    if last_val_report is not None:
-        print("\nFinal checkpoint val:")
-        print(format_metrics_table(last_val_report))
+    callbacks.on_train_end(
+        TrainEndState(
+            epochs=args.epochs,
+            output_dir=output_dir,
+            total_hours=total_hours,
+            last_val_report=last_val_report,
+        )
+    )
 
 
 if __name__ == "__main__":
