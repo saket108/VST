@@ -98,7 +98,6 @@ class DetectionLoss(nn.Module):
     ) -> LossOutput:
         cls_levels = outputs["cls"]  # type: ignore[index]
         box_levels = outputs["box"]  # type: ignore[index]
-        quality_levels = outputs.get("quality", outputs["center"])  # type: ignore[index]
 
         batch_size = cls_levels[0].shape[0]
         device = cls_levels[0].device
@@ -106,23 +105,20 @@ class DetectionLoss(nn.Module):
 
         flat_cls: list[torch.Tensor] = []
         flat_box: list[torch.Tensor] = []
-        flat_quality: list[torch.Tensor] = []
         flat_points: list[torch.Tensor] = []
         flat_ranges: list[torch.Tensor] = []
         flat_strides: list[torch.Tensor] = []
 
-        for cls_map, box_map, quality_map, stride, size_range in zip(
-            cls_levels, box_levels, quality_levels, self.strides, self.size_ranges
+        for cls_map, box_map, stride, size_range in zip(
+            cls_levels, box_levels, self.strides, self.size_ranges
         ):
             cls_map = cls_map.float()
             box_map = box_map.float()
-            quality_map = quality_map.float()
             _, _, feat_h, feat_w = cls_map.shape
             points = build_points(feat_h, feat_w, stride, device, loss_dtype)
 
             flat_cls.append(cls_map.permute(0, 2, 3, 1).reshape(batch_size, -1, self.num_classes))
             flat_box.append(box_map.permute(0, 2, 3, 1).reshape(batch_size, -1, 4) * stride)
-            flat_quality.append(quality_map.permute(0, 2, 3, 1).reshape(batch_size, -1))
             flat_points.append(points)
             flat_ranges.append(
                 torch.tensor(size_range, device=device, dtype=loss_dtype).expand(points.shape[0], 2)
@@ -133,7 +129,6 @@ class DetectionLoss(nn.Module):
 
         pred_cls = torch.cat(flat_cls, dim=1)
         pred_box = torch.cat(flat_box, dim=1)
-        pred_quality = torch.cat(flat_quality, dim=1)
         points = torch.cat(flat_points, dim=0)
         size_ranges = torch.cat(flat_ranges, dim=0)
         strides = torch.cat(flat_strides, dim=0)
@@ -158,16 +153,11 @@ class DetectionLoss(nn.Module):
                 cls_targets[pos_mask, assigned["labels"][pos_mask]] = iou_values
                 giou = generalized_box_iou(pred_boxes, target_boxes)
                 box_loss = box_loss + (1.0 - torch.diag(giou)).sum()
-                quality_loss = quality_loss + F.mse_loss(
-                    pred_quality[batch_index][pos_mask].sigmoid(),
-                    iou_values,
-                    reduction="sum",
-                )
                 total_pos += int(pos_mask.sum().item())
 
             cls_loss = cls_loss + varifocal_loss(pred_cls[batch_index], cls_targets).sum()
 
-        normalizer = max(total_pos, 1)
+        normalizer = max(total_pos, 10)
         cls_loss = cls_loss / normalizer
         box_loss = box_loss / normalizer
         quality_loss = quality_loss / normalizer
