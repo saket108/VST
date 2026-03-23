@@ -33,6 +33,15 @@ This is a research baseline. The code is custom, but a paper contribution still 
 - `data/dataset.py`: YOLO-format dataset loader
 - `utils/evaluator.py`: lightweight `mAP50` and `mAP50-95`
 
+## Recommended Path
+
+The repo now has two explicit pure-detection phases:
+
+- baseline: `configs/vstdet_pure_baseline.yaml`
+- competitive: `configs/vstdet_competitive_pure.yaml`
+
+The short roadmap is in `docs/ROADMAP.md`.
+
 ## Train
 
 Config-driven run:
@@ -57,6 +66,18 @@ Stronger detector variant:
 
 ```powershell
 python tools/train.py --data path\to\data.yaml --variant small --backbone convnext_tiny --neck cafpn --head-depth 3 --assigner atss --imgsz 640 --epochs 300 --batch-size 4
+```
+
+Pure detection baseline:
+
+```powershell
+python tools/train.py --config configs/vstdet_pure_baseline.yaml --data path\to\data.yaml
+```
+
+Competitive pure detector:
+
+```powershell
+python tools/train.py --config configs/vstdet_competitive_pure.yaml --data path\to\data.yaml
 ```
 
 Lighter pretrained backbone:
