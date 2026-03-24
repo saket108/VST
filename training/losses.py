@@ -45,7 +45,6 @@ class LossOutput:
     total: torch.Tensor
     cls: torch.Tensor
     box: torch.Tensor
-    quality: torch.Tensor
     positives: int
 
 
@@ -135,7 +134,6 @@ class DetectionLoss(nn.Module):
 
         cls_loss = pred_cls.new_tensor(0.0)
         box_loss = pred_cls.new_tensor(0.0)
-        quality_loss = pred_cls.new_tensor(0.0)
         total_pos = 0
 
         for batch_index, target in enumerate(targets):
@@ -160,9 +158,8 @@ class DetectionLoss(nn.Module):
         normalizer = max(total_pos, 10)
         cls_loss = cls_loss / normalizer
         box_loss = box_loss / normalizer
-        quality_loss = quality_loss / normalizer
-        total = cls_loss + box_loss + quality_loss
-        return LossOutput(total=total, cls=cls_loss, box=box_loss, quality=quality_loss, positives=total_pos)
+        total = cls_loss + box_loss
+        return LossOutput(total=total, cls=cls_loss, box=box_loss, positives=total_pos)
 
     def _assign_targets(
         self,

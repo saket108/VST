@@ -15,7 +15,7 @@ from torchvision.transforms import functional as TF
 import yaml
 
 from data.dataset import DEFAULT_FILL, IMAGE_SUFFIXES
-from model.detector import VSTDet
+from model.detector import VSTDet, load_compatible_model_state
 from utils.torch_utils import format_device_name, model_summary, resolve_device, seed_everything
 
 
@@ -104,7 +104,9 @@ def build_model_from_checkpoint(
         head_depth=int(checkpoint.get("head_depth", 2)),
         use_detail_branch=bool(checkpoint.get("use_detail_branch", False)),
     ).to(device)
-    model.load_state_dict(checkpoint["model_state"])  # type: ignore[arg-type]
+    stripped_keys = load_compatible_model_state(model, checkpoint["model_state"])  # type: ignore[arg-type]
+    if stripped_keys:
+        print("warning", f"ignored legacy head weights: {', '.join(stripped_keys)}")
     return model, [str(name) for name in checkpoint_names]
 
 

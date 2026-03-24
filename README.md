@@ -19,7 +19,7 @@ This project uses a cleaner research-style layout instead of a flat script packa
 - bidirectional weighted feature fusion neck
 - optional `CAFPN` neck for a stronger context-aware pyramid
 - optional `CAFPN-P2` neck for a lighter stride-2 small-object path
-- decoupled classification, box, and IoU-quality scoring head
+- decoupled classification and box-regression head with IoU-aware class targets
 - FCOS-style or ATSS-style point assignment and GIoU-based regression loss
 - direct support for datasets in YOLO annotation format
 

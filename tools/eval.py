@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 import yaml
 
 from data.dataset import YoloDetectionDataset, collate_fn
-from model.detector import VSTDet
+from model.detector import VSTDet, load_compatible_model_state
 from utils.evaluator import evaluate_detection_metrics, format_metrics_table
 from utils.plots import plot_per_class_metrics
 from utils.reporting import append_results_summary
@@ -102,7 +102,9 @@ def build_model_from_checkpoint(
         head_depth=int(checkpoint.get("head_depth", 2)),
         use_detail_branch=bool(checkpoint.get("use_detail_branch", False)),
     ).to(device)
-    model.load_state_dict(checkpoint["model_state"])  # type: ignore[arg-type]
+    stripped_keys = load_compatible_model_state(model, checkpoint["model_state"])  # type: ignore[arg-type]
+    if stripped_keys:
+        print("warning", f"ignored legacy head weights: {', '.join(stripped_keys)}")
     return model, names
 
 

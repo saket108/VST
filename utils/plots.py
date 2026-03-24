@@ -68,9 +68,8 @@ def plot_history(history_path: str | Path, output_path: str | Path) -> Path | No
         ("total", "train total", "#1f77b4"),
         ("cls", "train cls", "#ff7f0e"),
         ("box", "train box", "#2ca02c"),
-        ("quality", "train quality", "#d62728"),
     ):
-        xs, ys = _series_with_fallback(rows, key, "center" if key == "quality" else None)
+        xs, ys = _series(rows, key)
         if xs:
             loss_axis.plot(xs, ys, label=label, color=color, linewidth=2)
     loss_axis.set_title("Train Loss")
@@ -84,13 +83,8 @@ def plot_history(history_path: str | Path, output_path: str | Path) -> Path | No
         ("val_total", "val total", "#1f77b4"),
         ("val_cls", "val cls", "#ff7f0e"),
         ("val_box", "val box", "#2ca02c"),
-        ("val_quality", "val quality", "#d62728"),
     ):
-        xs, ys = _series_with_fallback(
-            rows,
-            key,
-            "val_center" if key == "val_quality" else None,
-        )
+        xs, ys = _series(rows, key)
         if xs:
             val_loss_axis.plot(xs, ys, label=label, color=color, linewidth=2)
     val_loss_axis.set_title("Validation Loss")

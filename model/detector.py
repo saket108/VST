@@ -353,26 +353,20 @@ class DetectionHead(nn.Module):
         self.reg_tower = HeadTower(channels, depth=depth)
         self.cls_pred = nn.Conv2d(channels, num_classes, 3, padding=1)
         self.box_pred = nn.Conv2d(channels, 4, 3, padding=1)
-        # Keep the checkpoint-compatible parameter name, but train it as an IoU-aware quality branch.
-        self.center_pred = nn.Conv2d(channels, 1, 3, padding=1)
         self.scales = nn.ModuleList([Scale() for _ in range(levels)])
         self._init_biases()
 
     def _init_biases(self, prior_prob: float = 0.01) -> None:
         cls_bias = math.log(prior_prob / (1.0 - prior_prob))
         nn.init.constant_(self.cls_pred.bias, cls_bias)
-        nn.init.constant_(self.center_pred.bias, math.log(0.1 / 0.9))
         nn.init.constant_(self.box_pred.bias, 1.0)
 
     def forward(self, features: tuple[torch.Tensor, ...]) -> dict[str, list[torch.Tensor]]:
-        outputs = {"cls": [], "box": [], "quality": [], "center": []}
+        outputs = {"cls": [], "box": []}
         for feature, scale in zip(features, self.scales):
             cls_feat = self.cls_tower(feature)
             reg_feat = self.reg_tower(feature)
             outputs["cls"].append(self.cls_pred(cls_feat))
-            quality_logits = self.center_pred(reg_feat)
-            outputs["quality"].append(quality_logits)
-            outputs["center"].append(quality_logits)
             # Keep regression in float32 even under AMP. Large positive logits can overflow
             # in float16 before softplus, which then corrupts GIoU with non-finite boxes.
             with torch.autocast(device_type=feature.device.type, enabled=False):
@@ -484,6 +478,24 @@ class VSTDet(nn.Module):
         return predictions
 
 
+def load_compatible_model_state(
+    model: nn.Module,
+    state_dict: dict[str, torch.Tensor],
+) -> list[str]:
+    legacy_keys = {"head.center_pred.weight", "head.center_pred.bias"}
+    filtered_state = {key: value for key, value in state_dict.items() if key not in legacy_keys}
+    incompatible = model.load_state_dict(filtered_state, strict=False)
+    unexpected = [key for key in incompatible.unexpected_keys if key not in legacy_keys]
+    if incompatible.missing_keys or unexpected:
+        issues: list[str] = []
+        if incompatible.missing_keys:
+            issues.append("missing keys: " + ", ".join(incompatible.missing_keys))
+        if unexpected:
+            issues.append("unexpected keys: " + ", ".join(unexpected))
+        raise RuntimeError("Checkpoint is incompatible with the current model: " + "; ".join(issues))
+    return [key for key in state_dict if key in legacy_keys]
+
+
 def decode_predictions(
     outputs: dict[str, list[torch.Tensor] | tuple[int, ...]],
     image_size: tuple[int, int],
@@ -493,7 +505,6 @@ def decode_predictions(
 ) -> list[dict[str, torch.Tensor]]:
     cls_levels = outputs["cls"]  # type: ignore[index]
     box_levels = outputs["box"]  # type: ignore[index]
-    quality_levels = outputs.get("quality", outputs["center"])  # type: ignore[index]
     strides = outputs["strides"]  # type: ignore[index]
 
     batch_size = cls_levels[0].shape[0]
@@ -505,9 +516,7 @@ def decode_predictions(
         image_scores: list[torch.Tensor] = []
         image_labels: list[torch.Tensor] = []
 
-        for cls_map, box_map, _, stride in zip(
-            cls_levels, box_levels, quality_levels, strides
-        ):
+        for cls_map, box_map, stride in zip(cls_levels, box_levels, strides):
             _, num_classes, feat_h, feat_w = cls_map.shape
             points = build_points(feat_h, feat_w, stride, cls_map.device, cls_map.dtype)
 

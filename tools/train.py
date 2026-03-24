@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 import yaml
 
 from data.dataset import AugmentConfig, YoloDetectionDataset, collate_fn
-from model.detector import VSTDet
+from model.detector import VSTDet, load_compatible_model_state
 from training import EpochCallbackState, TrainEndState, build_default_callbacks
 from training.engine import train_one_epoch, validate
 from training.losses import DetectionLoss
@@ -303,9 +303,18 @@ def load_checkpoint(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state"])
-    optimizer.load_state_dict(checkpoint["optimizer_state"])
-    scheduler.load_state_dict(checkpoint["scheduler_state"])
+    stripped_keys = load_compatible_model_state(model, checkpoint["model_state"])
+    if stripped_keys:
+        print("warning", f"ignored legacy head weights while loading {checkpoint_path.name}: {', '.join(stripped_keys)}")
+    try:
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+    except ValueError as error:
+        print(
+            "warning",
+            "optimizer state is incompatible with the cleaned head; "
+            f"continuing with fresh optimizer and scheduler ({error})",
+        )
     start_epoch = int(checkpoint["epoch"]) + 1
     best_metric = float(checkpoint.get("best_metric", 0.0))
     best_epoch = int(checkpoint.get("best_epoch", checkpoint["epoch"]))
@@ -451,7 +460,7 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs + 1):
         start = time.time()
         model.set_backbone_trainable(epoch > args.freeze_backbone_epochs)
-        print("\n      Epoch    GPU_mem   box_loss   cls_loss  qual_loss  Instances       Size")
+        print("\n      Epoch    GPU_mem   box_loss   cls_loss  Instances       Size")
         current_val_report: dict[str, object] | None = None
         train_metrics = train_one_epoch(
             model=model,
