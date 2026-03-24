@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--neck",
-        choices=["bifusion", "cafpn", "cafpn_p2"],
+        choices=["bifusion", "cafpn", "cafpn_lite", "cafpn_p2"],
         default="bifusion",
         help="Feature pyramid fusion module.",
     )

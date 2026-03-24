@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         choices=["custom", "mobilenet_v3_large", "efficientnet_v2_s", "convnext_tiny"],
         default="efficientnet_v2_s",
     )
-    parser.add_argument("--neck", choices=["bifusion", "cafpn", "cafpn_p2"], default="bifusion")
+    parser.add_argument("--neck", choices=["bifusion", "cafpn", "cafpn_lite", "cafpn_p2"], default="bifusion")
     parser.add_argument(
         "--pretrained-backbone",
         action=argparse.BooleanOptionalAction,

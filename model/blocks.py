@@ -17,9 +17,10 @@ class ConvBNAct(nn.Sequential):
         kernel_size: int = 3,
         stride: int = 1,
         groups: int = 1,
+        dilation: int = 1,
         act: bool = True,
     ) -> None:
-        padding = kernel_size // 2
+        padding = (kernel_size // 2) * dilation
         layers = [
             nn.Conv2d(
                 in_channels,
@@ -28,6 +29,7 @@ class ConvBNAct(nn.Sequential):
                 stride=stride,
                 padding=padding,
                 groups=groups,
+                dilation=dilation,
                 bias=False,
             ),
             nn.BatchNorm2d(out_channels),
@@ -101,6 +103,63 @@ class ContextBridge(nn.Module):
         local = self.local(x)
         gated = local * self.global_gate(x)
         return F.silu(x + self.mix(gated), inplace=True)
+
+
+class SpatialChannelGate(nn.Module):
+    def __init__(self, channels: int, reduction: int = 4, kernel_size: int = 7) -> None:
+        super().__init__()
+        hidden = max(channels // reduction, 16)
+        padding = kernel_size // 2
+        self.channel_gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, hidden, 1),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden, channels, 1),
+            nn.Sigmoid(),
+        )
+        self.spatial_gate = nn.Sequential(
+            nn.Conv2d(2, 1, kernel_size=kernel_size, padding=padding, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gated = x * self.channel_gate(x)
+        avg = gated.mean(dim=1, keepdim=True)
+        mx = gated.max(dim=1, keepdim=True).values
+        spatial = self.spatial_gate(torch.cat([avg, mx], dim=1))
+        return gated * spatial
+
+
+class DilatedContextBridge(nn.Module):
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        branch_channels = max(channels // 4, 16)
+        self.d1 = ConvBNAct(channels, branch_channels, kernel_size=3, groups=branch_channels)
+        self.d2 = ConvBNAct(
+            channels,
+            branch_channels,
+            kernel_size=3,
+            groups=branch_channels,
+            dilation=2,
+        )
+        self.d4 = ConvBNAct(
+            channels,
+            branch_channels,
+            kernel_size=3,
+            groups=branch_channels,
+            dilation=4,
+        )
+        self.fuse = ConvBNAct(branch_channels * 3, channels, kernel_size=1, act=False)
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, channels, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        multi_scale = torch.cat([self.d1(x), self.d2(x), self.d4(x)], dim=1)
+        refined = self.fuse(multi_scale)
+        return F.silu(x + refined * self.gate(x), inplace=True)
 
 
 class DetailStem(nn.Sequential):

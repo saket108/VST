@@ -22,9 +22,11 @@ from .blocks import (
     ContextAwareFusion,
     ContextBridge,
     ConvBNAct,
+    DilatedContextBridge,
     DetailStem,
     EdgeResidual,
     Scale,
+    SpatialChannelGate,
     WeightedFeatureFusion,
 )
 from utils.box_ops import distance_to_boxes
@@ -274,6 +276,68 @@ class CAFPNNeck(nn.Module):
         return tuple(block(feature) for block, feature in zip(self.refine, outputs))
 
 
+class CAFPNLiteNeck(nn.Module):
+    def __init__(self, in_channels: tuple[int, ...], out_channels: int) -> None:
+        super().__init__()
+        if len(in_channels) != 4:
+            raise ValueError("CAFPNLiteNeck expects four backbone feature levels.")
+
+        self.lateral = nn.ModuleList(
+            [ConvBNAct(ch, out_channels, kernel_size=1) for ch in in_channels]
+        )
+        self.downsample = nn.ModuleList(
+            [ConvBNAct(out_channels, out_channels, stride=2) for _ in range(3)]
+        )
+        self.context_inject = nn.ModuleList([SpatialChannelGate(out_channels) for _ in range(4)])
+
+        self.topdown_p4 = ContextAwareFusion(out_channels, inputs=2)
+        self.topdown_p3 = ContextAwareFusion(out_channels, inputs=2)
+        self.topdown_p2 = ContextAwareFusion(out_channels, inputs=2)
+        self.bottomup_p3 = ContextAwareFusion(out_channels, inputs=2)
+        self.bottomup_p4 = ContextAwareFusion(out_channels, inputs=2)
+        self.bottomup_p5 = ContextAwareFusion(out_channels, inputs=2)
+        self.refine = nn.ModuleList(
+            [
+                DilatedContextBridge(out_channels),
+                DilatedContextBridge(out_channels),
+                ContextBridge(out_channels),
+                ContextBridge(out_channels),
+            ]
+        )
+
+    def _apply_context(self, feature: torch.Tensor, context: torch.Tensor, index: int) -> torch.Tensor:
+        gated_context = self.context_inject[index](
+            F.interpolate(
+                context,
+                size=feature.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        )
+        return feature + gated_context
+
+    def forward(self, features: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+        p2, p3, p4, p5 = [layer(x) for layer, x in zip(self.lateral, features)]
+        global_context = p5
+
+        p4_td = self.topdown_p4([p4, F.interpolate(p5, size=p4.shape[-2:], mode="nearest")])
+        p4_td = self._apply_context(p4_td, global_context, 0)
+
+        p3_td = self.topdown_p3([p3, F.interpolate(p4_td, size=p3.shape[-2:], mode="nearest")])
+        p3_td = self._apply_context(p3_td, global_context, 1)
+
+        p2_td = self.topdown_p2([p2, F.interpolate(p3_td, size=p2.shape[-2:], mode="nearest")])
+        p2_td = self._apply_context(p2_td, global_context, 2)
+
+        p3_out = self.bottomup_p3([p3_td, self.downsample[0](p2_td)])
+        p4_out = self.bottomup_p4([p4_td, self.downsample[1](p3_out)])
+        p5_out = self.bottomup_p5([p5, self.downsample[2](p4_out)])
+        p5_out = self._apply_context(p5_out, global_context, 3)
+
+        outputs = [p2_td, p3_out, p4_out, p5_out]
+        return tuple(block(feature) for block, feature in zip(self.refine, outputs))
+
+
 class CAFPNP2Neck(nn.Module):
     def __init__(self, in_channels: tuple[int, ...], out_channels: int) -> None:
         super().__init__()
@@ -426,11 +490,15 @@ class VSTDet(nn.Module):
             if use_detail_branch:
                 raise ValueError("CAFPN neck does not support detail_branch.")
             self.neck = CAFPNNeck(neck_in_channels, cfg.head_channels)
+        elif neck_name == "cafpn_lite":
+            if use_detail_branch:
+                raise ValueError("CAFPN-Lite neck does not support detail_branch.")
+            self.neck = CAFPNLiteNeck(neck_in_channels, cfg.head_channels)
         elif neck_name == "cafpn_p2":
             self.neck = CAFPNP2Neck(neck_in_channels, cfg.head_channels)
         else:
             raise ValueError(
-                f"Unknown neck '{neck_name}'. Expected 'bifusion', 'cafpn', or 'cafpn_p2'."
+                f"Unknown neck '{neck_name}'. Expected 'bifusion', 'cafpn', 'cafpn_lite', or 'cafpn_p2'."
             )
         self.head = DetectionHead(
             cfg.head_channels,
